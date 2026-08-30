@@ -1,0 +1,48 @@
+mt5:
+  login: 0
+  password: ''
+  path: ''
+  server: ''
+  symbol: ''
+  timeout_ms: 60000
+news_shield:
+  currencies:
+  - USD
+  enable: true
+  impact_levels:
+  - High
+  post_news_pause_minutes: 15
+  pre_news_pause_minutes: 30
+  update_interval_hours: 4
+risk:
+  max_daily_signals: 6
+  max_sl_pips: 35.0
+  min_risk_reward_ratio: 1.5
+  min_sl_pips: 10.0
+  risk_per_trade_percent: 1.0
+  sl_buffer_pips: 2.0
+  target_risk_reward_ratio: 2.5
+strategy:
+  entry_timeframe: M5
+  higher_timeframe: H1
+  min_confluence_score: 3
+  name: Gold SMC and Price Action Sniper
+  require_candle_confirmation: true
+  require_fvg_or_ob: true
+  require_liquidity_sweep: true
+  require_mtf_alignment: true
+  sessions:
+    allowed_ranges_bkk:
+    - end: '18:30'
+      start: '13:30'
+    - end: '23:45'
+      start: '19:00'
+    enable_session_filter: true
+  trend_timeframe: M15
+system:
+  log_level: INFO
+  scan_interval_seconds: 5
+telegram:
+  bot_token: 8858228676:AAFJ3U3AeSGj6kLxSuGmkG4t5dheVLyGd7A
+  chat_id: '8949868154'
+  enable: true
