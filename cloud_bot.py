@@ -113,7 +113,7 @@ def telegram_webhook():
 
 def keep_alive_worker():
     """Pings the Render app every 5 minutes so it NEVER sleeps."""
-    render_url = os.environ.get("RENDER_EXTERNAL_URL", "https://gold-sniper-bot-h3m1.onrender.com")
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "https://gold-sniper-bot-b3ml.onrender.com")
     time.sleep(30)
     while True:
         try:
@@ -184,7 +184,7 @@ def market_scanner_worker():
 
 def setup_telegram_webhook():
     """Registers Webhook directly with Telegram."""
-    webhook_url = "https://gold-sniper-bot-h3m1.onrender.com/webhook"
+    webhook_url = "https://gold-sniper-bot-b3ml.onrender.com/webhook"
     tg_url = f"https://api.telegram.org/bot{bot_token}/setWebhook?url={webhook_url}"
     try:
         res = requests.get(tg_url, timeout=10)
