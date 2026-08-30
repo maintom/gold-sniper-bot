@@ -121,7 +121,7 @@ def keep_alive_worker():
             logger.info(f"Keep-Alive ping sent to {render_url} (Status: {res.status_code})")
         except Exception as e:
             logger.warning(f"Keep-alive ping notice: {e}")
-        time.sleep(300)  # Ping every 5 minutes
+        time.sleep(300)
 
 def market_scanner_worker():
     """Background real-time market scanner that auto-sends Grade A+ signals."""
@@ -192,16 +192,20 @@ def setup_telegram_webhook():
     except Exception as e:
         logger.warning(f"Error registering Telegram webhook: {e}")
 
+# Start background workers on module import (Gunicorn / Direct)
+_workers_started = False
+def init_background_workers():
+    global _workers_started
+    if not _workers_started:
+        _workers_started = True
+        setup_telegram_webhook()
+        t_ping = threading.Thread(target=keep_alive_worker, daemon=True)
+        t_ping.start()
+        t_scan = threading.Thread(target=market_scanner_worker, daemon=True)
+        t_scan.start()
+
+init_background_workers()
+
 if __name__ == "__main__":
-    setup_telegram_webhook()
-
-    # Start background threads
-    t_ping = threading.Thread(target=keep_alive_worker, daemon=True)
-    t_ping.start()
-
-    t_scan = threading.Thread(target=market_scanner_worker, daemon=True)
-    t_scan.start()
-
     port = int(os.environ.get("PORT", 10000))
-    logger.info(f"Starting Flask Webhook Server on port {port}...")
     app.run(host="0.0.0.0", port=port)
