@@ -8,6 +8,8 @@ if hasattr(sys.stdout, "reconfigure"):
 import os
 import time
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 import yaml
 import pandas as pd
@@ -25,6 +27,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger("CloudBot")
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple web server to satisfy Render Web Service port requirements."""
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Gold Precision AI Scalper is RUNNING 24/7 OK!")
+
+    def log_message(self, format, *args):
+        return  # Suppress HTTP request spam
+
+def start_health_server(port: int):
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"Render health check web server listening on port {port} OK.")
+    except Exception as e:
+        logger.warning(f"Health check server notice on port {port}: {e}")
+
 def clear_webhook(bot_token: str):
     try:
         url = f"https://api.telegram.org/bot{bot_token}/deleteWebhook"
@@ -37,6 +59,11 @@ def main():
     print("Starting Gold Precision AI Assistant (24/7 Cloud Edition)")
     print("=" * 60)
 
+    # 1. Start HTTP Server for Render port binding (Default: 10000 or env PORT)
+    port = int(os.environ.get("PORT", 10000))
+    start_health_server(port)
+
+    # 2. Load Configuration
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -44,13 +71,13 @@ def main():
     if bot_token:
         clear_webhook(bot_token)
 
-    # Initialize Components
+    # 3. Initialize Strategy & Bot Components
     gold_feed = CloudGoldFeed()
     news_engine = NewsEngine(config)
     scalper = PriceActionScalper(config)
     telegram = TelegramNotifier(config)
 
-    # Start Interactive Telegram Listener
+    # 4. Start Interactive Telegram Listener
     tg_interactive = TelegramInteractive("config.yaml", news_engine, gold_feed, scalper)
     tg_interactive.start()
 
@@ -61,9 +88,10 @@ def main():
     last_signal_time = None
     cooldown_minutes = 20
 
+    # 5. Real-time Market Monitoring Loop
     while True:
         try:
-            # 1. Fetch Real-time price & candles
+            # Fetch Real-time price & candles
             price_info = gold_feed.get_price()
             candles_m1 = gold_feed.get_candles("M1", count=100)
             candles_m5 = gold_feed.get_candles("M5", count=100)
@@ -71,10 +99,10 @@ def main():
             candles_h1 = gold_feed.get_candles("H1", count=100)
             candles_d1 = gold_feed.get_candles("D1", count=60)
 
-            # 2. Check News Shield
+            # Check News Shield
             news_status = news_engine.check_shield()
 
-            # 3. Analyze with AI & Macro Confluence
+            # Analyze with AI & Macro Confluence
             scalper_result = scalper.analyze(
                 candles_m1=candles_m1,
                 candles_m5=candles_m5,
@@ -86,7 +114,7 @@ def main():
                 account_balance=1000.0
             )
 
-            # 4. Dispatch Signal if Grade A+ / Approved
+            # Dispatch Signal if Grade A+ / Approved
             sig = scalper_result.get("signal", "WAIT")
             if sig in ["BUY", "SELL"]:
                 now = datetime.now()
