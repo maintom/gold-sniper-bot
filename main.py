@@ -34,14 +34,14 @@ def prompt_daily_goal_setup(config: dict, account_balance: float):
     """Allows user to set manual daily profit target and loss limits on startup."""
     mm = config.get("money_management", {})
     default_target = float(mm.get("daily_profit_target_usd", 300.0))
-    default_loss = float(mm.get("daily_max_loss_usd", round(account_balance * 0.10, 2)))
+    default_loss = float(mm.get("daily_max_loss_usd", 250.0))
 
     print("\n" + "=" * 60)
     print(" 🎯 INSTITUTIONAL DAILY GOAL & MONEY MANAGEMENT SETUP")
     print("=" * 60)
     print(f" 💰 ยอดบาลานซ์พอร์ตปัจจุบัน : ${account_balance:,.2f}")
     print(f" 🎯 ค่าเริ่มต้นเป้าหมายกำไร  : +${default_target:,.2f}")
-    print(f" 🛑 ค่าเริ่มต้นขีดจำกัดขาดทุน : -${default_loss:,.2f} (10% MM Rule)")
+    print(f" 🛑 ค่าเริ่มต้นขีดจำกัดขาดทุน : -${default_loss:,.2f}")
     print("-" * 60)
 
     try:
@@ -89,17 +89,18 @@ def main():
     executor = OrderExecutor(config, mt5_conn)
     reflection_engine = TradeReflectionEngine(config, telegram)
 
+    # Clean any old pending orders on startup
+    executor.clean_all_pending_orders()
+
     # 3. Start Interactive Telegram Listener
     tg_interactive = TelegramInteractive("config.yaml", news_engine, mt5_conn, scalper)
     tg_interactive.start()
 
     scan_interval = config.get("system", {}).get("scan_interval_seconds", 3)
-    max_open_trades = config.get("auto_trading", {}).get("max_open_trades", 1)
     last_dispatched_candle = None
 
     while True:
         try:
-            # Refresh config dynamically (in case updated via Telegram /setgoal)
             mm_cfg = config.get("money_management", {})
 
             # A. Fetch Real-time Tick, Account Info & Daily Performance
@@ -110,7 +111,7 @@ def main():
             # B. AI Self-Learning: Inspect Closed Trades & Generate Post-Mortems
             reflection_engine.inspect_and_learn_from_deals(OrderExecutor.MAGIC_NUMBER)
 
-            # C. Active Trade Management (Instant Auto Break-Even & Partial TP)
+            # C. Active Trade Management (Instant Auto Break-Even & Trailing)
             trade_updates = executor.manage_open_positions(price_info)
             for upd in trade_updates:
                 telegram.send_message(f"🛡️ <b>[Auto Trade Manager]</b>\n{upd}")
@@ -125,7 +126,7 @@ def main():
             # E. Check News Shield
             news_status = news_engine.check_shield()
 
-            # F. Run Adaptive Multi-Timeframe Playbook Analysis
+            # F. Run Top-Down Hierarchy Analysis
             scalper_result = scalper.analyze(
                 candles_m1=candles_m1,
                 candles_m5=candles_m5,
@@ -137,20 +138,13 @@ def main():
                 account_balance=account_info.get("balance", 1000.0)
             )
 
-            # G. Signal Trigger & Smart Layered Auto-Execution
+            # G. Signal Trigger & Strict Single-Trade Execution
             sig = scalper_result.get("signal", "WAIT")
             candle_time = scalper_result.get("candle_time")
 
             if sig in ["BUY", "SELL"]:
-                active_bot_positions = [
-                    p for p in (mt5.positions_get(symbol=mt5_conn.active_symbol) or [])
-                    if p.magic == OrderExecutor.MAGIC_NUMBER
-                ]
-
                 is_new_candle = (last_dispatched_candle != candle_time)
-                has_capacity = (len(active_bot_positions) < max_open_trades)
-
-                if is_new_candle and has_capacity:
+                if is_new_candle:
                     exec_result = executor.execute_trade(scalper_result, price_info)
 
                     if exec_result.get("success"):
@@ -158,12 +152,12 @@ def main():
                         scalper_result["reasons"].append(f"⚡ Auto-Executed on MT5 (Ticket #{exec_result['ticket']})")
                         telegram.send_trade_signal(
                             symbol=mt5_conn.active_symbol,
-                            timeframe=scalper_result.get("timeframe", "M5 Playbook"),
+                            timeframe=scalper_result.get("timeframe", "Top-Down Matrix"),
                             signal_data=scalper_result,
                             news_info=news_status.get("message", "")
                         )
                     else:
-                        logger.warning(f"Order skipped: {exec_result.get('message')}")
+                        logger.debug(f"Order not sent: {exec_result.get('message')}")
 
             # H. Update Console UI Dashboard
             ui.render_dashboard(
