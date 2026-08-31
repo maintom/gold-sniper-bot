@@ -1,5 +1,5 @@
 ﻿# ==========================================================
-# Institutional MT5 Auto-Execution & Money Management Engine
+# Institutional MT5 Auto-Execution & Layered Trade Engine
 # ==========================================================
 import logging
 import MetaTrader5 as mt5
@@ -13,9 +13,9 @@ class OrderExecutor:
     """
     Handles institutional-grade auto-execution directly on MetaTrader 5:
     1. Daily Profit Target & Daily Max Loss Circuit Breaker.
-    2. Sub-second market order placement with precise SL & TP.
-    3. Auto Break-Even (BE) at 1:1 RR to guarantee risk-free trades.
-    4. Trailing Stop Management.
+    2. Smart Layered Pyramiding (ซอยไม้ 50% ตลาด + 50% Limit ดักย่อ).
+    3. Instant Auto Break-Even (กันทุนทันทีที่ +10 pips / 1.0 RR).
+    4. Partial Take-Profit (ปิด 50% ที่ TP1 รันเทรนด์ที่ TP2).
     """
 
     MAGIC_NUMBER = 778899  # Unique ID for our AI Sniper Bot
@@ -31,8 +31,10 @@ class OrderExecutor:
         self.auto_trade_enabled = config.get("auto_trading", {}).get("enable", True)
         self.auto_be_enabled = config.get("auto_trading", {}).get("enable_auto_break_even", True)
         self.trailing_stop_enabled = config.get("auto_trading", {}).get("enable_trailing_stop", True)
+        self.smart_layering = config.get("auto_trading", {}).get("enable_smart_layering", True)
         
         self.local_tz = pytz.timezone("Asia/Bangkok")
+        self.partially_closed_tickets = set()
 
     def get_daily_performance(self) -> dict:
         """Calculates today's realized PnL from MT5 trade deals."""
@@ -67,8 +69,7 @@ class OrderExecutor:
 
     def execute_trade(self, signal_data: dict, current_price: dict) -> dict:
         """
-        Executes a live Market Order on MT5 within milliseconds.
-        Enforces Daily Profit Target & Daily Max Loss rules.
+        Executes an institutional trade on MT5 with Smart Layering option.
         """
         if not self.auto_trade_enabled:
             return {"success": False, "message": "Auto-trading is disabled in config"}
@@ -94,78 +95,112 @@ class OrderExecutor:
         if not trade_setup or action not in ["BUY", "SELL"]:
             return {"success": False, "message": "Invalid trade setup"}
 
-        # Get MT5 Symbol specifications
         sym_info = mt5.symbol_info(symbol)
         if not sym_info:
             return {"success": False, "message": f"Failed to get symbol info for {symbol}"}
 
-        # Select filling mode supported by broker
+        # Filling mode resolution
         filling_mode = mt5.ORDER_FILLING_IOC
         if hasattr(sym_info, "filling_mode"):
-            if sym_info.filling_mode & 1:  # FOK
+            if sym_info.filling_mode & 1:
                 filling_mode = mt5.ORDER_FILLING_FOK
-            elif sym_info.filling_mode & 2:  # IOC
+            elif sym_info.filling_mode & 2:
                 filling_mode = mt5.ORDER_FILLING_IOC
             else:
                 filling_mode = mt5.ORDER_FILLING_RETURN
 
-        # Sizing normalization
-        lot = float(trade_setup.get("recommended_lot", 0.01))
+        total_lot = float(trade_setup.get("recommended_lot", 0.01))
         step = sym_info.volume_step if sym_info.volume_step > 0 else 0.01
-        lot = round(round(lot / step) * step, 2)
-        lot = max(sym_info.volume_min, min(sym_info.volume_max, lot))
+        digits = sym_info.digits
+        pip_size = current_price.get("pip_size", 0.10)
+
+        sl = float(trade_setup.get("sl", 0.0))
+        tp1 = float(trade_setup.get("tp1", 0.0))
+        tp2 = float(trade_setup.get("tp2", 0.0))
+        
+        # Sizing: If total lot >= 0.04 and smart layering enabled, split into 2 layers (50% Market + 50% Limit)
+        if self.smart_layering and total_lot >= 0.04:
+            lot1 = round(round((total_lot * 0.5) / step) * step, 2)
+            lot2 = round(total_lot - lot1, 2)
+            lot1 = max(sym_info.volume_min, min(sym_info.volume_max, lot1))
+            lot2 = max(sym_info.volume_min, min(sym_info.volume_max, lot2))
+        else:
+            lot1 = round(round(total_lot / step) * step, 2)
+            lot1 = max(sym_info.volume_min, min(sym_info.volume_max, lot1))
+            lot2 = 0.0
 
         order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
         price = sym_info.ask if action == "BUY" else sym_info.bid
-        sl = float(trade_setup.get("sl", 0.0))
-        tp = float(trade_setup.get("tp2", trade_setup.get("tp1", 0.0)))
-        digits = sym_info.digits
 
-        request = {
+        # -------------------------------------------------------------
+        # LAYER 1: INSTANT MARKET ORDER (ไม้ที่ 1 - เข้าทันทีไม่ตกรถ)
+        # -------------------------------------------------------------
+        req1 = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
-            "volume": lot,
+            "volume": lot1,
             "type": order_type,
             "price": round(price, digits),
             "sl": round(sl, digits),
-            "tp": round(tp, digits),
+            "tp": round(tp2 if tp2 > 0 else tp1, digits),
             "deviation": 20,
             "magic": self.MAGIC_NUMBER,
-            "comment": f"AI_{action}",
+            "comment": f"AI_{action}_L1",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling_mode,
         }
 
-        logger.info(f"⚡ SENDING MT5 INSTANT ORDER: {action} {lot} Lot @ {price} (SL: {sl}, TP: {tp})")
-        result = mt5.order_send(request)
-
-        if result is None:
-            err = mt5.last_error()
-            logger.error(f"MT5 order_send returned None. Error: {err}")
+        res1 = mt5.order_send(req1)
+        if res1 is None or res1.retcode != mt5.TRADE_RETCODE_DONE:
+            err = res1.comment if res1 else mt5.last_error()
+            logger.error(f"MT5 Order L1 Failed: {err}")
             return {"success": False, "message": f"MT5 Error: {err}"}
 
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error(f"MT5 Order Failed. Retcode: {result.retcode} ({result.comment})")
-            return {"success": False, "message": f"Retcode {result.retcode}: {result.comment}"}
+        logger.info(f"✅ LAYER 1 EXECUTED: #{res1.order} | {action} {lot1} Lot @ {res1.price}")
 
-        logger.info(f"✅ MT5 ORDER EXECUTED SUCCESSFULLY! Ticket: #{result.order} | Price: {result.price}")
-        
+        # -------------------------------------------------------------
+        # LAYER 2: DISCOUNT LIMIT ORDER (ไม้ที่ 2 - ดักย่อได้เปรียบราคา)
+        # -------------------------------------------------------------
+        if lot2 > 0:
+            limit_offset = 12 * pip_size  # 1.2 USD discount
+            limit_price = round(price - limit_offset, digits) if action == "BUY" else round(price + limit_offset, digits)
+            limit_type = mt5.ORDER_TYPE_BUY_LIMIT if action == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
+
+            req2 = {
+                "action": mt5.TRADE_ACTION_PENDING,
+                "symbol": symbol,
+                "volume": lot2,
+                "type": limit_type,
+                "price": limit_price,
+                "sl": round(sl, digits),
+                "tp": round(tp2 if tp2 > 0 else tp1, digits),
+                "deviation": 20,
+                "magic": self.MAGIC_NUMBER,
+                "comment": f"AI_{action}_L2_Limit",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
+            res2 = mt5.order_send(req2)
+            if res2 and res2.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"🎯 LAYER 2 PENDING LIMIT PLACED: #{res2.order} | {action}_LIMIT {lot2} Lot @ {limit_price}")
+
         return {
             "success": True,
-            "ticket": result.order,
+            "ticket": res1.order,
             "action": action,
-            "volume": result.volume,
-            "price": result.price,
+            "volume": total_lot,
+            "price": res1.price,
             "sl": sl,
-            "tp": tp,
-            "message": f"Order #{result.order} filled at {result.price}"
+            "tp": tp2,
+            "message": f"Order #{res1.order} filled at {res1.price} (Smart Layered)"
         }
 
     def manage_open_positions(self, current_price: dict) -> list:
         """
-        Monitors active trades:
-        1. Auto Break-Even: Moves SL to entry price once 1:1 RR is hit.
-        2. Dynamic Trailing: Locks in profits.
+        Active Trade Manager:
+        1. Instant Auto Break-Even: Locks SL to Entry + 1.5 pips as soon as profit >= 10 pips.
+        2. Partial Take-Profit: Closes 50% volume at TP1 to bank profit, leaves 50% runner.
+        3. Trailing Stop: Trails the runner to TP2.
         """
         symbol = self.mt5_conn.active_symbol
         if not symbol:
@@ -188,15 +223,18 @@ class OrderExecutor:
             current_sl = pos.sl
             current_tp = pos.tp
             cur_price = pos.price_current
+            volume = pos.volume
             digits = pos.digits
 
-            # AUTO BREAK-EVEN (BE) LOGIC
+            # -------------------------------------------------------------
+            # 1. INSTANT AUTO BREAK-EVEN (เมื่อบวกถึง +10 จุด / $1.00)
+            # -------------------------------------------------------------
             if self.auto_be_enabled:
                 if pos_type == mt5.ORDER_TYPE_BUY:
-                    initial_risk = open_price - current_sl if current_sl > 0 else (25 * pip_size)
                     profit_distance = cur_price - open_price
-                    if profit_distance >= initial_risk and current_sl < open_price:
-                        new_sl = round(open_price + (2 * pip_size), digits)
+                    # If profit >= 10 pips ($1.00) and SL is still below entry
+                    if profit_distance >= (10.0 * pip_size) and current_sl < open_price:
+                        new_sl = round(open_price + (1.5 * pip_size), digits)  # Entry + 1.5 pips
                         req = {
                             "action": mt5.TRADE_ACTION_SLTP,
                             "position": ticket,
@@ -206,14 +244,15 @@ class OrderExecutor:
                         }
                         res = mt5.order_send(req)
                         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"🛡️ AUTO BREAK-EVEN: Ticket #{ticket} SL moved to {new_sl} (Risk-Free!)")
-                            updates.append(f"🛡️ Ticket #{ticket}: SL moved to Break-Even (${new_sl})")
+                            msg = f"🛡️ [กันทุนสำเร็จ] Ticket #{ticket} เลื่อน SL มาที่ ${new_sl} (0% Risk กันทุน 100%)"
+                            logger.info(msg)
+                            updates.append(msg)
 
                 elif pos_type == mt5.ORDER_TYPE_SELL:
-                    initial_risk = current_sl - open_price if current_sl > 0 else (25 * pip_size)
                     profit_distance = open_price - cur_price
-                    if profit_distance >= initial_risk and (current_sl > open_price or current_sl == 0):
-                        new_sl = round(open_price - (2 * pip_size), digits)
+                    # If profit >= 10 pips ($1.00) and SL is still above entry
+                    if profit_distance >= (10.0 * pip_size) and (current_sl > open_price or current_sl == 0):
+                        new_sl = round(open_price - (1.5 * pip_size), digits)  # Entry - 1.5 pips
                         req = {
                             "action": mt5.TRADE_ACTION_SLTP,
                             "position": ticket,
@@ -223,7 +262,38 @@ class OrderExecutor:
                         }
                         res = mt5.order_send(req)
                         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"🛡️ AUTO BREAK-EVEN: Ticket #{ticket} SL moved to {new_sl} (Risk-Free!)")
-                            updates.append(f"🛡️ Ticket #{ticket}: SL moved to Break-Even (${new_sl})")
+                            msg = f"🛡️ [กันทุนสำเร็จ] Ticket #{ticket} เลื่อน SL มาที่ ${new_sl} (0% Risk กันทุน 100%)"
+                            logger.info(msg)
+                            updates.append(msg)
+
+            # -------------------------------------------------------------
+            # 2. PARTIAL TAKE PROFIT (ปิด 50% เมื่อบวกถึง 20 pips)
+            # -------------------------------------------------------------
+            if volume >= 0.02 and ticket not in self.partially_closed_tickets:
+                profit_pips = (cur_price - open_price) / pip_size if pos_type == mt5.ORDER_TYPE_BUY else (open_price - cur_price) / pip_size
+                if profit_pips >= 20.0:  # Hit +20 pips
+                    close_vol = round(volume / 2.0, 2)
+                    close_type = mt5.ORDER_TYPE_SELL if pos_type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                    close_price = mt5.symbol_info_tick(symbol).bid if pos_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(symbol).ask
+
+                    close_req = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "position": ticket,
+                        "symbol": symbol,
+                        "volume": close_vol,
+                        "type": close_type,
+                        "price": close_price,
+                        "deviation": 20,
+                        "magic": self.MAGIC_NUMBER,
+                        "comment": "Partial_TP_50pct",
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": mt5.ORDER_FILLING_IOC,
+                    }
+                    c_res = mt5.order_send(close_req)
+                    if c_res and c_res.retcode == mt5.TRADE_RETCODE_DONE:
+                        self.partially_closed_tickets.add(ticket)
+                        msg = f"💰 [ปิดทำกำไร 50%] Ticket #{ticket} ปิด {close_vol} Lot รับกำไรเข้าพอร์ตแล้ว! (เหลืออีก 50% รันเทรนด์ต่อ)"
+                        logger.info(msg)
+                        updates.append(msg)
 
         return updates

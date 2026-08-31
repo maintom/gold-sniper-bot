@@ -1,5 +1,5 @@
 ﻿# ==========================================================
-# Gold MT5 Auto-Execution Precision Scalper (Local Master Engine)
+# Gold MT5 Auto-Execution Precision Scalper (Master AI Engine)
 # ==========================================================
 import sys
 if hasattr(sys.stdout, "reconfigure"):
@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from core.mt5_connector import MT5Connector
 from core.news_engine import NewsEngine
 from core.order_executor import OrderExecutor
+from core.trade_reflection import TradeReflectionEngine
 from strategy.price_action_scalper import PriceActionScalper
 from notifications.telegram_bot import TelegramNotifier
 from notifications.telegram_interactive import TelegramInteractive
@@ -42,10 +43,11 @@ def main():
         return
 
     # 2. Initialize Core Engines
+    telegram = TelegramNotifier(config)
     news_engine = NewsEngine(config)
     scalper = PriceActionScalper(config)
     executor = OrderExecutor(config, mt5_conn)
-    telegram = TelegramNotifier(config)
+    reflection_engine = TradeReflectionEngine(config, telegram)
 
     # 3. Start Interactive Telegram Listener
     tg_interactive = TelegramInteractive("config.yaml", news_engine, mt5_conn, scalper)
@@ -62,22 +64,25 @@ def main():
             account_info = mt5_conn.get_account_info()
             perf_info = executor.get_daily_performance()
 
-            # B. Manage Active Open Trades (Auto Break-Even & Trailing)
+            # B. AI Self-Learning: Inspect Closed Trades & Generate Post-Mortems
+            reflection_engine.inspect_and_learn_from_deals(OrderExecutor.MAGIC_NUMBER)
+
+            # C. Active Trade Management (Instant Auto Break-Even & Partial TP)
             trade_updates = executor.manage_open_positions(price_info)
             for upd in trade_updates:
                 telegram.send_message(f"🛡️ <b>[Auto Trade Manager]</b>\n{upd}")
 
-            # C. Fetch Multi-Timeframe OHLCV Candles
+            # D. Fetch Multi-Timeframe OHLCV Candles
             candles_m1 = mt5_conn.get_candles("M1", count=100)
             candles_m5 = mt5_conn.get_candles("M5", count=100)
             candles_m15 = mt5_conn.get_candles("M15", count=100)
             candles_h1 = mt5_conn.get_candles("H1", count=100)
             candles_d1 = mt5_conn.get_candles("D1", count=60)
 
-            # D. Check News Shield
+            # E. Check News Shield
             news_status = news_engine.check_shield()
 
-            # E. Run Top-Down Institutional Playbook Analysis
+            # F. Run Adaptive Multi-Timeframe Playbook Analysis
             scalper_result = scalper.analyze(
                 candles_m1=candles_m1,
                 candles_m5=candles_m5,
@@ -89,7 +94,7 @@ def main():
                 account_balance=account_info.get("balance", 1000.0)
             )
 
-            # F. Signal Trigger & Dynamic Auto-Execution (Zero-Desync)
+            # G. Signal Trigger & Smart Layered Auto-Execution
             sig = scalper_result.get("signal", "WAIT")
             candle_time = scalper_result.get("candle_time")
 
@@ -103,7 +108,6 @@ def main():
                 has_capacity = (len(active_bot_positions) < max_open_trades)
 
                 if is_new_candle and has_capacity:
-                    # 1. INSTANT AUTO-EXECUTION ON MT5 (0.02s)
                     exec_result = executor.execute_trade(scalper_result, price_info)
 
                     if exec_result.get("success"):
@@ -118,7 +122,7 @@ def main():
                     else:
                         logger.warning(f"Order skipped: {exec_result.get('message')}")
 
-            # G. Update Console UI Dashboard
+            # H. Update Console UI Dashboard
             ui.render_dashboard(
                 symbol=mt5_conn.active_symbol,
                 price_info=price_info,
