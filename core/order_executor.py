@@ -224,7 +224,7 @@ class OrderExecutor:
             current_tp = pos.tp
             cur_price = pos.price_current
             volume = pos.volume
-            digits = pos.digits
+            digits = self.mt5_conn.symbol_info.digits if self.mt5_conn.symbol_info else 2
 
             # -------------------------------------------------------------
             # 1. INSTANT AUTO BREAK-EVEN (เมื่อบวกถึง +10 จุด / $1.00)
