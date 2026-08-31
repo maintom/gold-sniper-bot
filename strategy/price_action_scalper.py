@@ -1,5 +1,5 @@
 ﻿# ==========================================================
-# Gold Top-Down Institutional Scalper (HTF Filter -> LTF Trigger)
+# Gold Early-Anticipation Top-Down Scalper (M1-Trigger on M5/H1 POI)
 # ==========================================================
 import logging
 from datetime import datetime
@@ -47,13 +47,14 @@ class PriceActionScalper:
                 candles_d1: pd.DataFrame, current_price: dict, 
                 news_status: dict, account_balance: float = 1000.0) -> dict:
         """
-        Executes Institutional Top-Down Analysis:
-        1. Higher Timeframe (H1/M15): Filters overall Trend & Macro Bias.
-        2. Lower Timeframe (M5/M1): Scans for the ONE high-probability precision trigger.
+        Early-Anticipation Top-Down Scalper:
+        1. Macro & HTF (D1/H1/M15): Detects Key S/R & Trend Bias.
+        2. Early M1/M5 Micro-Trigger: Detects early rejection within the first 60-120 seconds of the move.
+        3. Dynamic Entry Zone: Provides exact Entry & Pullback zone so trader never chases the market.
         """
         result = {
             "signal": "WAIT",
-            "timeframe": "M5 (Top-Down)",
+            "timeframe": "M5 Early Sniper (M1 Trigger)",
             "candle_time": None,
             "confluence_score": 0,
             "stars": "",
@@ -99,17 +100,32 @@ class PriceActionScalper:
         m15_struct = SMCEngine.analyze_market_structure(candles_m15)
         result["htf_trend"] = f"H1: {h1_struct['trend']} | M15: {m15_struct['trend']}"
 
-        # 5. LTF Trigger Scan on M5 (Primary Execution TF)
-        last_closed_bar = candles_m5.iloc[-2]
+        # 5. Early Sub-Minute & M5 Sweep Detection
+        # Check both M5 candle and M1 fast rejection
+        sweep_data_m5 = SMCEngine.detect_liquidity_sweep(candles_m5, lookback=20)
+        sweep_data_m1 = SMCEngine.detect_liquidity_sweep(candles_m1, lookback=15) if candles_m1 is not None and len(candles_m1) >= 20 else {"sweep_type": "NONE"}
+        
+        fvgs_m5 = SMCEngine.detect_fair_value_gaps(candles_m5, max_lookback=10)
+        
+        last_m5_bar = candles_m5.iloc[-2]
         bar_time = candles_m5.index[-2]
         result["candle_time"] = bar_time
 
-        sweep_data = SMCEngine.detect_liquidity_sweep(candles_m5, lookback=20)
-        fvgs = SMCEngine.detect_fair_value_gaps(candles_m5, max_lookback=10)
-        curr_candle = IndicatorEngine.analyze_candlestick(
-            last_closed_bar['open'], last_closed_bar['high'], 
-            last_closed_bar['low'], last_closed_bar['close']
+        # Analyze latest M1 and M5 candles
+        curr_m5_candle = IndicatorEngine.analyze_candlestick(
+            last_m5_bar['open'], last_m5_bar['high'], 
+            last_m5_bar['low'], last_m5_bar['close']
         )
+
+        last_m1_bar = candles_m1.iloc[-2] if candles_m1 is not None and len(candles_m1) >= 5 else last_m5_bar
+        curr_m1_candle = IndicatorEngine.analyze_candlestick(
+            last_m1_bar['open'], last_m1_bar['high'], 
+            last_m1_bar['low'], last_m1_bar['close']
+        )
+
+        # Merge sweep & rejection (prioritize M1 fast trigger if M5 is in POI)
+        active_sweep = sweep_data_m5 if sweep_data_m5["sweep_type"] != "NONE" else sweep_data_m1
+        active_candle = curr_m1_candle if (curr_m1_candle["is_pinbar_bull"] or curr_m1_candle["is_pinbar_bear"]) else curr_m5_candle
 
         mtf_metrics = {
             "m15_trend": m15_struct["trend"],
@@ -117,12 +133,11 @@ class PriceActionScalper:
             "above_ema50": m15_struct.get("current_above_ema50", False)
         }
 
-        fvg_bullish_tap = any(f["type"] == "BULLISH_FVG" and f["bottom"] <= mid_price <= f["top"] + (2.5 * pip_size) for f in fvgs)
-        fvg_bearish_tap = any(f["type"] == "BEARISH_FVG" and f["bottom"] - (2.5 * pip_size) <= mid_price <= f["top"] for f in fvgs)
+        fvg_bullish_tap = any(f["type"] == "BULLISH_FVG" and f["bottom"] <= mid_price <= f["top"] + (2.5 * pip_size) for f in fvgs_m5)
+        fvg_bearish_tap = any(f["type"] == "BEARISH_FVG" and f["bottom"] - (2.5 * pip_size) <= mid_price <= f["top"] for f in fvgs_m5)
 
         # -------------------------------------------------------------
-        # TOP-DOWN BUY EVALUATION
-        # Require HTF Alignment (H1/M15 Bullish or at Major Support)
+        # TOP-DOWN EARLY BUY EVALUATION
         # -------------------------------------------------------------
         htf_allows_buy = (m15_struct["trend"] == "BULLISH" or h1_struct["trend"] == "BULLISH" or 
                           (macro_info.get("is_at_key_level") and macro_info.get("zone_type") == "SUPPORT"))
@@ -130,8 +145,8 @@ class PriceActionScalper:
         if htf_allows_buy:
             buy_ai = AICandleClassifier.evaluate_setup(
                 action="BUY",
-                candle_metrics=curr_candle,
-                sweep_metrics=sweep_data,
+                candle_metrics=active_candle,
+                sweep_metrics=active_sweep,
                 macro_metrics=macro_info,
                 mtf_metrics=mtf_metrics,
                 fvg_present=fvg_bullish_tap,
@@ -139,25 +154,24 @@ class PriceActionScalper:
             )
 
             if buy_ai["approved"]:
-                sl_ref = sweep_data.get("wick_low", last_closed_bar['low'])
+                sl_ref = active_sweep.get("wick_low", min(last_m5_bar['low'], last_m1_bar['low']))
                 trade = self.risk_manager.calculate_trade_levels("BUY", mid_price, sl_ref, pip_size, account_balance)
                 if trade.get("is_valid", False):
                     result["signal"] = "BUY"
-                    result["timeframe"] = "M5 (Top-Down H1+M15)"
+                    result["timeframe"] = "M5 Early Sniper"
                     result["win_probability"] = buy_ai["win_probability"]
                     result["grade"] = buy_ai["grade"]
                     result["stars"] = buy_ai["stars"]
                     result["trade_setup"] = trade
                     result["reasons"] = [
                         f"🏛️ HTF Bias: {result['htf_trend']}",
-                        f"🎯 M5 Trigger: SSL Sweep at ${sweep_data.get('sweep_level', mid_price):.2f}" if sweep_data.get("sweep_type") == "BULLISH_SWEEP" else "🔨 M5 Rejection Reversal",
+                        f"⚡ Early M1/M5 Trigger: Rejection at ${sl_ref:.2f}",
                         f"📍 Macro: {macro_info['description']}"
                     ]
                     return result
 
         # -------------------------------------------------------------
-        # TOP-DOWN SELL EVALUATION
-        # Require HTF Alignment (H1/M15 Bearish or at Major Resistance)
+        # TOP-DOWN EARLY SELL EVALUATION
         # -------------------------------------------------------------
         htf_allows_sell = (m15_struct["trend"] == "BEARISH" or h1_struct["trend"] == "BEARISH" or 
                            (macro_info.get("is_at_key_level") and macro_info.get("zone_type") == "RESISTANCE"))
@@ -165,8 +179,8 @@ class PriceActionScalper:
         if htf_allows_sell:
             sell_ai = AICandleClassifier.evaluate_setup(
                 action="SELL",
-                candle_metrics=curr_candle,
-                sweep_metrics=sweep_data,
+                candle_metrics=active_candle,
+                sweep_metrics=active_sweep,
                 macro_metrics=macro_info,
                 mtf_metrics=mtf_metrics,
                 fvg_present=fvg_bearish_tap,
@@ -174,21 +188,21 @@ class PriceActionScalper:
             )
 
             if sell_ai["approved"]:
-                sl_ref = sweep_data.get("wick_high", last_closed_bar['high'])
+                sl_ref = active_sweep.get("wick_high", max(last_m5_bar['high'], last_m1_bar['high']))
                 trade = self.risk_manager.calculate_trade_levels("SELL", mid_price, sl_ref, pip_size, account_balance)
                 if trade.get("is_valid", False):
                     result["signal"] = "SELL"
-                    result["timeframe"] = "M5 (Top-Down H1+M15)"
+                    result["timeframe"] = "M5 Early Sniper"
                     result["win_probability"] = sell_ai["win_probability"]
                     result["grade"] = sell_ai["grade"]
                     result["stars"] = sell_ai["stars"]
                     result["trade_setup"] = trade
                     result["reasons"] = [
                         f"🏛️ HTF Bias: {result['htf_trend']}",
-                        f"🎯 M5 Trigger: BSL Sweep at ${sweep_data.get('sweep_level', mid_price):.2f}" if sweep_data.get("sweep_type") == "BEARISH_SWEEP" else "🌠 M5 Rejection Reversal",
+                        f"⚡ Early M1/M5 Trigger: Rejection at ${sl_ref:.2f}",
                         f"📍 Macro: {macro_info['description']}"
                     ]
                     return result
 
-        result["reasons"] = ["Market in consolidation / waiting for HTF + LTF top-down alignment."]
+        result["reasons"] = ["Market in consolidation / waiting for HTF + LTF early trigger."]
         return result

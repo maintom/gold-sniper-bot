@@ -129,7 +129,7 @@ def market_scanner_worker():
     3. Top-Down HTF+LTF Consolidated Card.
     """
     logger.info("Market scanner background thread started (Top-Down Anti-Spam Mode).")
-    scan_interval = 10
+    scan_interval = 4
     
     last_dispatched_candle = None
     last_dispatched_direction = None
