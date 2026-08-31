@@ -21,6 +21,12 @@ class ConsoleUI:
                          perf_info: dict = None, mm_config: dict = None):
         now_str = datetime.now(self.local_tz).strftime("%Y-%m-%d %H:%M:%S")
 
+        pnl_val = perf_info.get("profit", 0.0) if perf_info else 0.0
+        target_usd = mm_config.get("daily_profit_target_usd", 300.0) if mm_config else 300.0
+        max_loss = mm_config.get("daily_max_loss_usd", 250.0) if mm_config else 250.0
+
+        is_circuit_breaker = (pnl_val <= -max_loss)
+
         # Top Header
         header_text = Text()
         header_text.append("[*] GOLD INSTITUTIONAL SNIPER BOT (Playbook & MM Edition)\n", style="bold yellow")
@@ -28,10 +34,12 @@ class ConsoleUI:
         
         if not account_info.get("terminal_trade_allowed", True):
             header_text.append("⚠️ [ALGO TRADING IS OFF IN MT5] -> กรุณากดปุ่ม 'การเทรดอัลกอ' บน MT5 ให้เป็นสีเขียว!", style="bold red blink")
+        elif is_circuit_breaker:
+            header_text.append(f"🛑 [CIRCUIT BREAKER LOCK: วันนี้ขาดทุนสะสม -${abs(pnl_val):.2f} เกินขีดจำกัด -${max_loss:.2f}]", style="bold red blink")
         else:
             header_text.append("🟢 [AUTO-TRADING ACTIVE] -> ระบบพร้อมยิงออเดอร์ใน 0.02s", style="bold green")
 
-        # Account & Money Management Info Table
+        # Account Info Table
         info_table = Table(show_header=True, header_style="bold magenta", expand=True)
         info_table.add_column("Symbol", style="bold cyan", justify="center")
         info_table.add_column("Bid / Ask", justify="center")
@@ -46,16 +54,12 @@ class ConsoleUI:
         balance = f"${account_info.get('balance', 0.0):,.2f}" if account_info else "N/A"
         equity = f"${account_info.get('equity', 0.0):,.2f}" if account_info else "N/A"
         
-        pnl_val = perf_info.get("profit", 0.0) if perf_info else 0.0
         pnl_color = "green" if pnl_val >= 0 else "red"
         pnl_str = f"[{pnl_color}]${pnl_val:+,.2f} ({perf_info.get('wins', 0)}W/{perf_info.get('losses', 0)}L)[/{pnl_color}]" if perf_info else "$0.00"
 
         info_table.add_row(symbol or "Searching...", f"{bid} / {ask}", spread, balance, equity, pnl_str)
 
-        # Daily Target & MM Goal Panel
-        target_usd = mm_config.get("daily_profit_target_usd", 300.0) if mm_config else 300.0
-        max_loss = mm_config.get("daily_max_loss_usd", 150.0) if mm_config else 150.0
-        
+        # Target Panel
         progress_pct = max(0.0, min(100.0, (pnl_val / target_usd * 100.0))) if target_usd > 0 else 0.0
         filled_bars = int(progress_pct / 5)
         bar_visual = "█" * filled_bars + "░" * (20 - filled_bars)
@@ -94,7 +98,7 @@ class ConsoleUI:
             sig_header = f"[-] 📉 SELL SIGNAL TRIGGERED ({tf_badge}) {stars}"
         else:
             border = "blue"
-            sig_header = f"[*] MARKET SCANNING / WAITING FOR SMC SETUP ({tf_badge})"
+            sig_header = f"[*] MARKET SCANNING / WAITING FOR SETUP ({tf_badge})"
 
         sig_lines = [sig_header, ""]
         if trade:
