@@ -1,5 +1,5 @@
 ﻿# ==========================================================
-# Institutional Top-Down MT5 Execution & Anti-Overtrade Engine
+# Institutional Top-Down MT5 Execution & Multi-Tier Trailing Engine
 # ==========================================================
 import logging
 import MetaTrader5 as mt5
@@ -16,7 +16,11 @@ class OrderExecutor:
     2. Auto-Clean all orphan pending limit orders.
     3. 3-Minute Post-Trade Cooldown (Prevents rapid machine-gun spam).
     4. Two Distinct Modes: Quick Scalp (1 ไม้จบ 0.04 Lot) vs Trend Runner (0.02 + 0.01 Pyramid).
-    5. Active Management: Instant Break-Even + Partial TP + Trailing Stop.
+    5. Multi-Tier Dynamic Trailing Stop Engine (ขยับล็อคกำไรเป็นขั้นบันได):
+       - Tier 1 (+10 pips): Lock SL at Entry + 2.0 pips (Zero Risk).
+       - Tier 2 (+20 pips): Lock SL at Entry + 10.0 pips (Guaranteed Profit).
+       - Tier 3 (+30 pips): Lock SL at Entry + 20.0 pips (Big Profit Lock).
+       - Tier 4 (+40+ pips): Dynamic Trailing by 10 pips step until TP.
     """
 
     MAGIC_NUMBER = 778899
@@ -26,8 +30,8 @@ class OrderExecutor:
         self.mt5_conn = mt5_connector
         
         self.mm_config = config.get("money_management", {})
-        self.daily_profit_target = self.mm_config.get("daily_profit_target_usd", 300.0)
-        self.daily_max_loss = self.mm_config.get("daily_max_loss_usd", 250.0)
+        self.daily_profit_target = self.mm_config.get("daily_profit_target_usd", 500.0)
+        self.daily_max_loss = self.mm_config.get("daily_max_loss_usd", 300.0)
         
         self.auto_trade_enabled = config.get("auto_trading", {}).get("enable", True)
         self.auto_be_enabled = config.get("auto_trading", {}).get("enable_auto_break_even", True)
@@ -36,7 +40,6 @@ class OrderExecutor:
         self.local_tz = pytz.timezone("Asia/Bangkok")
         self.last_trade_closed_time = datetime.min
         self.cooldown_seconds = 180  # Strict 3-Minute Cooldown after trade closes
-        self.partially_closed_tickets = set()
 
     def clean_all_pending_orders(self) -> int:
         """Cancels all orphaned pending limit orders to keep chart 100% clean."""
@@ -98,6 +101,12 @@ class OrderExecutor:
         if not symbol:
             return {"success": False, "message": "No active symbol"}
 
+        # Spread Protection Check
+        max_spread = self.config.get("system", {}).get("max_spread_pips", 4.5)
+        current_spread = current_price.get("spread_pips", 2.0)
+        if current_spread > max_spread:
+            return {"success": False, "message": f"Spread too wide ({current_spread} pips > {max_spread} pips)"}
+
         # 1. HARD RULE: Max 1 Active Position at a time (Zero Machine-Gun Stacking!)
         active_pos = [p for p in (mt5.positions_get(symbol=symbol) or []) if p.magic == self.MAGIC_NUMBER]
         active_ord = [o for o in (mt5.orders_get(symbol=symbol) or []) if o.magic == self.MAGIC_NUMBER]
@@ -121,7 +130,7 @@ class OrderExecutor:
 
         action = signal_data.get("signal", "")
         trade_setup = signal_data.get("trade_setup", {})
-        trade_mode = signal_data.get("trade_mode", "QUICK_SCALP")  # QUICK_SCALP vs TREND_RUNNER
+        trade_mode = signal_data.get("trade_mode", "QUICK_SCALP")
 
         if not trade_setup or action not in ["BUY", "SELL"]:
             return {"success": False, "message": "Invalid trade setup"}
@@ -145,9 +154,7 @@ class OrderExecutor:
         digits = sym_info.digits
         step = sym_info.volume_step if sym_info.volume_step > 0 else 0.01
 
-        # Lot Sizing based on Trade Mode:
-        # Quick Scalp: 1 Single Clean Order (0.04 Lot)
-        # Trend Runner: Base Probe (0.02 Lot)
+        # Lot Sizing
         if trade_mode == "TREND_RUNNER":
             lot = 0.02
         else:
@@ -198,10 +205,11 @@ class OrderExecutor:
 
     def manage_open_positions(self, current_price: dict) -> list:
         """
-        Active Trade Manager:
-        1. Quick Scalp: Move SL to Break-Even at +8 pips ($0.80).
-        2. Trend Runner: Move SL to Break-Even at +15 pips, Trail SL behind 5M swings.
-        3. Sets cooldown and cleans pending limits when positions close.
+        Multi-Tier Dynamic Trailing Stop Engine:
+        - Tier 1 (>= +10 pips): Lock SL at Entry + 2.0 pips (Zero Risk).
+        - Tier 2 (>= +20 pips): Lock SL at Entry + 10.0 pips (Guaranteed Profit).
+        - Tier 3 (>= +30 pips): Lock SL at Entry + 20.0 pips (Big Profit Lock).
+        - Tier 4 (>= +40+ pips): Dynamic Trailing by 10 pips step.
         """
         symbol = self.mt5_conn.active_symbol
         if not symbol:
@@ -230,33 +238,83 @@ class OrderExecutor:
             current_sl = pos.sl
             current_tp = pos.tp
             cur_price = pos.price_current
-            comment = pos.comment
 
-            is_trend_runner = "TREND" in comment
-            be_trigger_pips = 15.0 if is_trend_runner else 8.0  # +8 pips for Quick Scalp, +15 for Trend
+            if pos_type == mt5.ORDER_TYPE_BUY:
+                profit_distance = cur_price - open_price
+                profit_pips = profit_distance / pip_size
 
-            # AUTO BREAK-EVEN LOGIC
-            if self.auto_be_enabled:
-                if pos_type == mt5.ORDER_TYPE_BUY:
-                    profit_distance = cur_price - open_price
-                    if profit_distance >= (be_trigger_pips * pip_size) and current_sl < open_price:
-                        new_sl = round(open_price + (1.5 * pip_size), digits)
-                        req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": symbol, "sl": new_sl, "tp": current_tp}
-                        res = mt5.order_send(req)
-                        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                            msg = f"🛡️ [กันทุนสำเร็จ] Ticket #{ticket} เลื่อน SL มาที่ ${new_sl} (0% Risk กันทุน 100%)"
-                            logger.info(msg)
-                            updates.append(msg)
+                target_sl = None
+                tier_badge = ""
 
-                elif pos_type == mt5.ORDER_TYPE_SELL:
-                    profit_distance = open_price - cur_price
-                    if profit_distance >= (be_trigger_pips * pip_size) and (current_sl > open_price or current_sl == 0):
-                        new_sl = round(open_price - (1.5 * pip_size), digits)
-                        req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": symbol, "sl": new_sl, "tp": current_tp}
-                        res = mt5.order_send(req)
-                        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                            msg = f"🛡️ [กันทุนสำเร็จ] Ticket #{ticket} เลื่อน SL มาที่ ${new_sl} (0% Risk กันทุน 100%)"
-                            logger.info(msg)
-                            updates.append(msg)
+                # Tier 4: Profit >= +40 pips (Dynamic 10-pip trail)
+                if profit_pips >= 40.0:
+                    calc_sl = round(cur_price - (12.0 * pip_size), digits)
+                    if calc_sl > current_sl:
+                        target_sl = calc_sl
+                        tier_badge = f"🚀 [Trailing Step] ล็อคกำไรที่ +{round((calc_sl - open_price)/pip_size, 1)} pips"
+                # Tier 3: Profit >= +30 pips
+                elif profit_pips >= 30.0:
+                    calc_sl = round(open_price + (20.0 * pip_size), digits)
+                    if calc_sl > current_sl:
+                        target_sl = calc_sl
+                        tier_badge = "💰 [Tier 3 Lock] ล็อคกำไรแน่น +20 pips ($2.00)"
+                # Tier 2: Profit >= +20 pips
+                elif profit_pips >= 20.0:
+                    calc_sl = round(open_price + (10.0 * pip_size), digits)
+                    if calc_sl > current_sl:
+                        target_sl = calc_sl
+                        tier_badge = "💵 [Tier 2 Lock] ล็อคกำไร +10 pips ($1.00)"
+                # Tier 1: Profit >= +10 pips (Initial Break-Even)
+                elif profit_pips >= 10.0 and current_sl < open_price:
+                    calc_sl = round(open_price + (2.0 * pip_size), digits)
+                    target_sl = calc_sl
+                    tier_badge = "🛡️ [Tier 1 กันทุน] เลื่อน SL มาหน้าทุน +2 pips (0% Risk)"
+
+                if target_sl and target_sl != current_sl:
+                    req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": symbol, "sl": target_sl, "tp": current_tp}
+                    res = mt5.order_send(req)
+                    if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                        msg = f"{tier_badge} | Ticket #{ticket} (SL: ${target_sl})"
+                        logger.info(msg)
+                        updates.append(msg)
+
+            elif pos_type == mt5.ORDER_TYPE_SELL:
+                profit_distance = open_price - cur_price
+                profit_pips = profit_distance / pip_size
+
+                target_sl = None
+                tier_badge = ""
+
+                # Tier 4: Profit >= +40 pips (Dynamic 10-pip trail)
+                if profit_pips >= 40.0:
+                    calc_sl = round(cur_price + (12.0 * pip_size), digits)
+                    if current_sl == 0 or calc_sl < current_sl:
+                        target_sl = calc_sl
+                        tier_badge = f"🚀 [Trailing Step] ล็อคกำไรที่ +{round((open_price - calc_sl)/pip_size, 1)} pips"
+                # Tier 3: Profit >= +30 pips
+                elif profit_pips >= 30.0:
+                    calc_sl = round(open_price - (20.0 * pip_size), digits)
+                    if current_sl == 0 or calc_sl < current_sl:
+                        target_sl = calc_sl
+                        tier_badge = "💰 [Tier 3 Lock] ล็อคกำไรแน่น +20 pips ($2.00)"
+                # Tier 2: Profit >= +20 pips
+                elif profit_pips >= 20.0:
+                    calc_sl = round(open_price - (10.0 * pip_size), digits)
+                    if current_sl == 0 or calc_sl < current_sl:
+                        target_sl = calc_sl
+                        tier_badge = "💵 [Tier 2 Lock] ล็อคกำไร +10 pips ($1.00)"
+                # Tier 1: Profit >= +10 pips (Initial Break-Even)
+                elif profit_pips >= 10.0 and (current_sl > open_price or current_sl == 0):
+                    calc_sl = round(open_price - (2.0 * pip_size), digits)
+                    target_sl = calc_sl
+                    tier_badge = "🛡️ [Tier 1 กันทุน] เลื่อน SL มาหน้าทุน +2 pips (0% Risk)"
+
+                if target_sl and target_sl != current_sl:
+                    req = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": symbol, "sl": target_sl, "tp": current_tp}
+                    res = mt5.order_send(req)
+                    if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                        msg = f"{tier_badge} | Ticket #{ticket} (SL: ${target_sl})"
+                        logger.info(msg)
+                        updates.append(msg)
 
         return updates

@@ -58,6 +58,7 @@ strategy:
   trend_timeframe: M15
 system:
   log_level: INFO
+  max_spread_pips: 4.5
   scan_interval_seconds: 5
 telegram:
   bot_token: 8858228676:AAFJ3U3AeSGj6kLxSuGmkG4t5dheVLyGd7A
