@@ -1,5 +1,5 @@
 ﻿# ==========================================================
-# True Institutional SMC 3-Pillar Scalper (Zero Guessing)
+# True Dual-Direction Institutional Scalper (2-Way Flow Engine)
 # ==========================================================
 import logging
 from datetime import datetime
@@ -51,14 +51,13 @@ class PriceActionScalper:
                 candles_d1: pd.DataFrame, current_price: dict, 
                 news_status: dict, account_balance: float = 1000.0) -> dict:
         """
-        True Institutional SMC Engine (Zero-Guessing):
-        - Pillar 1: HTF Structure Confirmation (H1/M15 trend & EMA alignment)
-        - Pillar 2: Liquidity Sweep / Order Block / FVG mitigation
-        - Pillar 3: Valid Rejection Candlestick Pattern (Hammer/Star/Engulfing)
+        True Dual-Direction Scalper:
+        - Trades BOTH BUY & SELL based on Market Phase (Trend Continuation & S/R Swings)
+        - Captures Range Swings between Support & Resistance on M1/M5
         """
         result = {
             "signal": "WAIT",
-            "timeframe": "M5 Institutional SMC",
+            "timeframe": "M5 2-Way Scalper",
             "candle_time": None,
             "confluence_score": 0,
             "stars": "",
@@ -99,7 +98,7 @@ class PriceActionScalper:
         macro_info = self.macro_engine.check_macro_confluence(mid_price, pip_size)
         result["macro_zone"] = macro_info.get("description", "None")
 
-        # 4. Pillar 1: Market Structure & EMAs
+        # 4. Master Trend & Structure
         m15_struct = SMCEngine.analyze_market_structure(candles_m15)
         h1_struct = SMCEngine.analyze_market_structure(candles_h1) if candles_h1 is not None and len(candles_h1) >= 20 else {"trend": "NEUTRAL"}
         
@@ -108,13 +107,14 @@ class PriceActionScalper:
         above_ema50 = m15_struct.get("current_above_ema50", False)
         result["htf_trend"] = f"M15: {m15_trend} (EMA50: {'ABOVE' if above_ema50 else 'BELOW'}) | H1: {h1_trend}"
 
-        # 5. Pillar 2 & 3: Entry Analysis on M5 & M1
+        # 5. Candle & SMC Analysis on M5 & M1
         last_m5_bar = candles_m5.iloc[-2]
         prev_m5_bar = candles_m5.iloc[-3]
         bar_time = candles_m5.index[-2]
         result["candle_time"] = bar_time
 
         sweep_m5 = SMCEngine.detect_liquidity_sweep(candles_m5, lookback=20)
+        sweep_m1 = SMCEngine.detect_liquidity_sweep(candles_m1, lookback=15) if candles_m1 is not None and len(candles_m1) >= 20 else {"sweep_type": "NONE"}
         fvgs_m5 = SMCEngine.detect_fair_value_gaps(candles_m5, max_lookback=10)
 
         candle_m5 = IndicatorEngine.analyze_candlestick(last_m5_bar['open'], last_m5_bar['high'], last_m5_bar['low'], last_m5_bar['close'])
@@ -131,17 +131,21 @@ class PriceActionScalper:
         }
 
         # -----------------------------------------------------------------
-        # STRICT BUY CONFLUENCE (ย่อ BUY / รันเทรนด์)
-        # MUST SATISFY:
-        # 1. Trend: M15 is BULLISH and Price > EMA50 (or at Major Support)
-        # 2. SMC: Real SSL Sweep OR Bullish FVG Mitigation
-        # 3. Price Action: Bullish Pin Bar (Hammer) OR Bullish Engulfing
+        # DUAL-DIRECTION STRATEGY 1: BUY SETUP (ย่อ BUY / สวิงรับกลับตัว)
         # -----------------------------------------------------------------
-        is_bullish_trend = (m15_trend == "BULLISH" and above_ema50) or (macro_info.get("is_at_key_level") and macro_info.get("zone_type") == "SUPPORT")
-        has_bullish_smc = (sweep_m5["sweep_type"] == "BULLISH_SWEEP") or fvg_bullish_tap or (macro_info.get("is_at_key_level") and macro_info.get("zone_type") == "SUPPORT")
-        has_bullish_rejection = candle_m5.get("is_pinbar_bull", False) or (engulfing_m5 == "BULLISH_ENGULFING") or (candle_m5.get("lower_wick_pct", 0) >= 40.0)
+        # Condition A: Trend Buy (M15 Bullish + Pullback)
+        is_trend_buy = (m15_trend == "BULLISH" and above_ema50)
+        # Condition B: Support / Liquidity Sweep Buy (At Major Support / Sweep Low / Bullish FVG)
+        is_support_buy = (sweep_m5["sweep_type"] == "BULLISH_SWEEP") or (macro_info.get("is_at_key_level") and macro_info.get("zone_type") == "SUPPORT") or fvg_bullish_tap
+        
+        has_bullish_rejection = (
+            candle_m5.get("is_pinbar_bull", False) or 
+            (engulfing_m5 == "BULLISH_ENGULFING") or 
+            (candle_m5.get("lower_wick_pct", 0) >= 35.0) or
+            (last_m5_bar['close'] > last_m5_bar['open'] and (last_m5_bar['close'] - last_m5_bar['open']) > (last_m5_bar['high'] - last_m5_bar['close']))
+        )
 
-        if is_bullish_trend and has_bullish_smc and has_bullish_rejection:
+        if (is_trend_buy or is_support_buy) and has_bullish_rejection:
             buy_ai = AICandleClassifier.evaluate_setup("BUY", candle_m5, sweep_m5, macro_info, mtf_metrics, fvg_bullish_tap, is_active)
 
             if buy_ai["approved"]:
@@ -149,12 +153,12 @@ class PriceActionScalper:
                 trade = self.risk_manager.calculate_trade_levels("BUY", mid_price, sl_ref, pip_size, account_balance)
 
                 if trade.get("is_valid", False):
-                    if h1_trend == "BULLISH" and m15_trend == "BULLISH":
+                    if is_trend_buy and h1_trend == "BULLISH":
                         mode_badge = "M15/H1 (🏃 รันเทรนด์ใหญ่ขาขึ้น)"
-                    elif sweep_m5.get("sweep_type") == "BULLISH_SWEEP":
-                        mode_badge = "M5 (🎯 ย่อ BUY กวาดสภาพคล่อง)"
+                    elif is_support_buy:
+                        mode_badge = "M5 (🎯 ย่อ BUY ที่แนวรับ/กวาด Low)"
                     else:
-                        mode_badge = "M5 (📈 ย่อ BUY ตามเทรนด์)"
+                        mode_badge = "M5 (📈 ย่อ BUY ตามรอบสวิง)"
 
                     result["signal"] = "BUY"
                     result["timeframe"] = mode_badge
@@ -170,17 +174,21 @@ class PriceActionScalper:
                     return result
 
         # -----------------------------------------------------------------
-        # STRICT SELL CONFLUENCE (เด้ง SELL / รันเทรนด์)
-        # MUST SATISFY:
-        # 1. Trend: M15 is BEARISH and Price < EMA50 (or at Major Resistance)
-        # 2. SMC: Real BSL Sweep OR Bearish FVG Mitigation
-        # 3. Price Action: Bearish Pin Bar (Shooting Star) OR Bearish Engulfing
+        # DUAL-DIRECTION STRATEGY 2: SELL SETUP (เด้ง SELL / สวิงต้านกลับตัว)
         # -----------------------------------------------------------------
-        is_bearish_trend = (m15_trend == "BEARISH" and not above_ema50) or (macro_info.get("is_at_key_level") and macro_info.get("zone_type") == "RESISTANCE")
-        has_bearish_smc = (sweep_m5["sweep_type"] == "BEARISH_SWEEP") or fvg_bearish_tap or (macro_info.get("is_at_key_level") and macro_info.get("zone_type") == "RESISTANCE")
-        has_bearish_rejection = candle_m5.get("is_pinbar_bear", False) or (engulfing_m5 == "BEARISH_ENGULFING") or (candle_m5.get("upper_wick_pct", 0) >= 40.0)
+        # Condition A: Trend Sell (M15 Bearish + Rally)
+        is_trend_sell = (m15_trend == "BEARISH" and not above_ema50)
+        # Condition B: Resistance / Liquidity Sweep Sell (At Major Resistance / Sweep High / Bearish FVG)
+        is_resistance_sell = (sweep_m5["sweep_type"] == "BEARISH_SWEEP") or (macro_info.get("is_at_key_level") and macro_info.get("zone_type") == "RESISTANCE") or fvg_bearish_tap
+        
+        has_bearish_rejection = (
+            candle_m5.get("is_pinbar_bear", False) or 
+            (engulfing_m5 == "BEARISH_ENGULFING") or 
+            (candle_m5.get("upper_wick_pct", 0) >= 35.0) or
+            (last_m5_bar['close'] < last_m5_bar['open'] and (last_m5_bar['open'] - last_m5_bar['close']) > (last_m5_bar['close'] - last_m5_bar['low']))
+        )
 
-        if is_bearish_trend and has_bearish_smc and has_bearish_rejection:
+        if (is_trend_sell or is_resistance_sell) and has_bearish_rejection:
             sell_ai = AICandleClassifier.evaluate_setup("SELL", candle_m5, sweep_m5, macro_info, mtf_metrics, fvg_bearish_tap, is_active)
 
             if sell_ai["approved"]:
@@ -188,12 +196,12 @@ class PriceActionScalper:
                 trade = self.risk_manager.calculate_trade_levels("SELL", mid_price, sl_ref, pip_size, account_balance)
 
                 if trade.get("is_valid", False):
-                    if h1_trend == "BEARISH" and m15_trend == "BEARISH":
+                    if is_trend_sell and h1_trend == "BEARISH":
                         mode_badge = "M15/H1 (🏃 รันเทรนด์ใหญ่ขาลง)"
-                    elif sweep_m5.get("sweep_type") == "BEARISH_SWEEP":
-                        mode_badge = "M5 (🎯 เด้ง SELL กวาดสภาพคล่อง)"
+                    elif is_resistance_sell:
+                        mode_badge = "M5 (🎯 เด้ง SELL ที่แนวต้าน/กวาด High)"
                     else:
-                        mode_badge = "M5 (📉 เด้ง SELL ตามเทรนด์)"
+                        mode_badge = "M5 (📉 เด้ง SELL ตามรอบสวิง)"
 
                     result["signal"] = "SELL"
                     result["timeframe"] = mode_badge
@@ -208,5 +216,5 @@ class PriceActionScalper:
                     ]
                     return result
 
-        result["reasons"] = [f"รอจังหวะ SMC Confluence (Trend + Sweep/FVG + Rejection) ({result['htf_trend']})"]
+        result["reasons"] = [f"รอจังหวะ Rejection ทั้ง 2 หน้า (ย่อ Buy แนวรับ / เด้ง Sell แนวต้าน) ({result['htf_trend']})"]
         return result
