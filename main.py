@@ -8,6 +8,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import time
 import logging
 import yaml
+import MetaTrader5 as mt5
 import pandas as pd
 from datetime import datetime, timedelta
 
@@ -51,10 +52,8 @@ def main():
     tg_interactive.start()
 
     scan_interval = config.get("system", {}).get("scan_interval_seconds", 3)
+    max_open_trades = config.get("auto_trading", {}).get("max_open_trades", 1)
     last_dispatched_candle = None
-    last_dispatched_direction = None
-    last_dispatched_time = None
-    cooldown_minutes = 30
 
     while True:
         try:
@@ -89,24 +88,26 @@ def main():
                 account_balance=account_info.get("balance", 1000.0)
             )
 
-            # F. Signal Trigger & Instant Auto-Execution
+            # F. Signal Trigger & Dynamic Auto-Execution
             sig = scalper_result.get("signal", "WAIT")
             candle_time = scalper_result.get("candle_time")
-            now = datetime.now()
 
             if sig in ["BUY", "SELL"]:
-                is_new_candle = (last_dispatched_candle != candle_time)
-                time_ok = (last_dispatched_time is None or (now - last_dispatched_time) > timedelta(minutes=cooldown_minutes))
-                is_reversal = (last_dispatched_direction is not None and last_dispatched_direction != sig)
+                # Check active bot positions in MT5
+                active_bot_positions = [
+                    p for p in (mt5.positions_get(symbol=mt5_conn.active_symbol) or [])
+                    if p.magic == OrderExecutor.MAGIC_NUMBER
+                ]
 
-                if is_new_candle and (time_ok or is_reversal):
+                is_new_candle = (last_dispatched_candle != candle_time)
+                has_capacity = (len(active_bot_positions) < max_open_trades)
+
+                if is_new_candle and has_capacity:
                     # 1. INSTANT AUTO-EXECUTION ON MT5 (0.02s)
                     exec_result = executor.execute_trade(scalper_result, price_info)
 
                     if exec_result.get("success"):
                         last_dispatched_candle = candle_time
-                        last_dispatched_direction = sig
-                        last_dispatched_time = now
                         scalper_result["reasons"].append(f"⚡ Auto-Executed on MT5 (Ticket #{exec_result['ticket']})")
                         telegram.send_trade_signal(
                             symbol=mt5_conn.active_symbol,
