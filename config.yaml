@@ -49,8 +49,10 @@ strategy:
   require_mtf_alignment: true
   sessions:
     allowed_ranges_bkk:
-    - end: 03:00
+    - end: '23:59'
       start: 06:00
+    - end: 03:00
+      start: 00:00
     enable_session_filter: true
   strict_trend_following: true
   trend_timeframe: M15
