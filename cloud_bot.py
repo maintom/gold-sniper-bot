@@ -1,6 +1,6 @@
 ﻿# ==========================================================
 # 24/7 Cloud Gold Precision Scalper & Telegram Assistant
-# (Render Webhook + Auto-KeepAlive + Market Scanner)
+# (Top-Down Institutional Filter + Strict Anti-Spam Gate)
 # ==========================================================
 import sys
 if hasattr(sys.stdout, "reconfigure"):
@@ -72,7 +72,6 @@ def telegram_webhook():
     logger.info(f"Incoming Telegram Message from {sender_chat_id}: {text}")
 
     try:
-        # Fetch live market data
         price_info = gold_feed.get_price() or {}
         news_status = news_engine.check_shield() or {}
 
@@ -101,7 +100,6 @@ def telegram_webhook():
             "scalper_result": scalper_result
         }
 
-        # Process Natural Language & reply immediately
         reply = nlp_engine.process_message(text, market_context)
         telegram.send_message(reply, target_chat_id=sender_chat_id)
 
@@ -124,12 +122,19 @@ def keep_alive_worker():
         time.sleep(300)
 
 def market_scanner_worker():
-    """Background real-time market scanner that auto-sends Grade A+ signals."""
-    logger.info("Market scanner background thread started.")
+    """
+    Background market scanner with STRICT Anti-Spam Gate:
+    1. Candle-Lock: Max 1 signal per closed candle.
+    2. Cooldown: Minimum 30 minutes between same-direction signals.
+    3. Top-Down HTF+LTF Consolidated Card.
+    """
+    logger.info("Market scanner background thread started (Top-Down Anti-Spam Mode).")
     scan_interval = 10
-    last_signal_hash = None
-    last_signal_time = None
-    cooldown_minutes = 20
+    
+    last_dispatched_candle = None
+    last_dispatched_direction = None
+    last_dispatched_time = None
+    cooldown_minutes = 30
 
     time.sleep(10)
     while True:
@@ -155,24 +160,34 @@ def market_scanner_worker():
             )
 
             sig = scalper_result.get("signal", "WAIT")
+            candle_time = scalper_result.get("candle_time")
+            now = datetime.now()
+
             if sig in ["BUY", "SELL"]:
-                now = datetime.now()
-                sig_hash = f"{sig}_{scalper_result.get('trade_setup', {}).get('entry')}"
-                
                 can_dispatch = False
-                if last_signal_hash != sig_hash:
-                    can_dispatch = True
-                elif last_signal_time and (now - last_signal_time) > timedelta(minutes=cooldown_minutes):
+                
+                # Rule 1: Must be a new closed candle
+                is_new_candle = (last_dispatched_candle != candle_time)
+                
+                # Rule 2: Minimum 30-minute cooldown for same direction
+                time_elapsed_ok = (last_dispatched_time is None or (now - last_dispatched_time) > timedelta(minutes=cooldown_minutes))
+                
+                # Rule 3: Immediate dispatch if direction reversed (e.g. from BUY to SELL)
+                is_reversal = (last_dispatched_direction is not None and last_dispatched_direction != sig)
+
+                if is_new_candle and (time_elapsed_ok or is_reversal):
                     can_dispatch = True
 
                 if can_dispatch:
-                    last_signal_hash = sig_hash
-                    last_signal_time = now
-                    logger.info(f"🚀 CLOUD AI SIGNAL DETECTED: {sig} | Prob: {scalper_result.get('win_probability')}%")
+                    last_dispatched_candle = candle_time
+                    last_dispatched_direction = sig
+                    last_dispatched_time = now
+
+                    logger.info(f"🏆 TOP-DOWN SNIPER SIGNAL APPROVED: {sig} | Prob: {scalper_result.get('win_probability')}% | Candle: {candle_time}")
 
                     telegram.send_trade_signal(
                         symbol="XAUUSD",
-                        timeframe=scalper_result.get("timeframe", "M5"),
+                        timeframe=scalper_result.get("timeframe", "M5 (Top-Down)"),
                         signal_data=scalper_result,
                         news_info=news_status.get("message", "")
                     )
@@ -183,7 +198,6 @@ def market_scanner_worker():
             time.sleep(scan_interval)
 
 def setup_telegram_webhook():
-    """Registers Webhook directly with Telegram."""
     webhook_url = "https://gold-sniper-bot-b3ml.onrender.com/webhook"
     tg_url = f"https://api.telegram.org/bot{bot_token}/setWebhook?url={webhook_url}"
     try:
@@ -192,7 +206,6 @@ def setup_telegram_webhook():
     except Exception as e:
         logger.warning(f"Error registering Telegram webhook: {e}")
 
-# Start background workers on module import (Gunicorn / Direct)
 _workers_started = False
 def init_background_workers():
     global _workers_started
