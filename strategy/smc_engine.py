@@ -190,9 +190,10 @@ class SMCEngine:
         if len(df) < 25:
             return {"trend": "NEUTRAL", "current_above_ema50": False}
 
-        df_emas = IndicatorEngine.calculate_ema(df, [20, 50])
-        ema20 = df_emas['ema_20'].iloc[-2]
-        ema50 = df_emas['ema_50'].iloc[-2]
+        ema20_series = IndicatorEngine.calculate_ema(df['close'], 20)
+        ema50_series = IndicatorEngine.calculate_ema(df['close'], 50)
+        ema20 = ema20_series.iloc[-2]
+        ema50 = ema50_series.iloc[-2]
         close_p = df['close'].iloc[-2]
 
         df_swings = IndicatorEngine.find_swing_points(df, window=2)
