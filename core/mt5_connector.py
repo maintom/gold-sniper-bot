@@ -164,6 +164,8 @@ class MT5Connector:
         if acc is None:
             return {}
 
+        term = mt5.terminal_info()
+        trade_allowed = term.trade_allowed if term else True
         return {
             "login": acc.login,
             "server": acc.server,
@@ -174,7 +176,8 @@ class MT5Connector:
             "free_margin": acc.margin_free,
             "margin_level": acc.margin_level,
             "leverage": acc.leverage,
-            "profit": acc.profit
+            "profit": acc.profit,
+            "terminal_trade_allowed": trade_allowed
         }
 
     def shutdown(self):

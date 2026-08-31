@@ -23,7 +23,11 @@ class ConsoleUI:
         # Top Header
         header_text = Text()
         header_text.append("[*] GOLD PRECISION SCALPING ASSISTANT (Exness MT5)\n", style="bold yellow")
-        header_text.append(f"[*] BKK Time: {now_str} | Market: {session_desc}", style="cyan")
+        header_text.append(f"[*] BKK Time: {now_str} | Market: {session_desc}\n", style="cyan")
+        if not account_info.get("terminal_trade_allowed", True):
+            header_text.append("?? [ALGO TRADING IS OFF IN MT5] -> ??????????? '????????????' ?? MT5 ??????????????!", style="bold red blink")
+        else:
+            header_text.append("?? [AUTO-TRADING ACTIVE] -> ????????????????????? 0.02s", style="bold green")
 
         # Account & Market Info Table
         info_table = Table(show_header=True, header_style="bold magenta", expand=True)
