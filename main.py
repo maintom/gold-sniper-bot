@@ -57,9 +57,10 @@ def main():
 
     while True:
         try:
-            # A. Fetch Real-time Tick & Account Info
+            # A. Fetch Real-time Tick, Account Info & Daily Performance
             price_info = mt5_conn.get_price()
             account_info = mt5_conn.get_account_info()
+            perf_info = executor.get_daily_performance()
 
             # B. Manage Active Open Trades (Auto Break-Even & Trailing)
             trade_updates = executor.manage_open_positions(price_info)
@@ -76,7 +77,7 @@ def main():
             # D. Check News Shield
             news_status = news_engine.check_shield()
 
-            # E. Run Top-Down Institutional Analysis
+            # E. Run Top-Down Institutional Playbook Analysis
             scalper_result = scalper.analyze(
                 candles_m1=candles_m1,
                 candles_m5=candles_m5,
@@ -88,12 +89,11 @@ def main():
                 account_balance=account_info.get("balance", 1000.0)
             )
 
-            # F. Signal Trigger & Dynamic Auto-Execution
+            # F. Signal Trigger & Dynamic Auto-Execution (Zero-Desync)
             sig = scalper_result.get("signal", "WAIT")
             candle_time = scalper_result.get("candle_time")
 
             if sig in ["BUY", "SELL"]:
-                # Check active bot positions in MT5
                 active_bot_positions = [
                     p for p in (mt5.positions_get(symbol=mt5_conn.active_symbol) or [])
                     if p.magic == OrderExecutor.MAGIC_NUMBER
@@ -111,12 +111,12 @@ def main():
                         scalper_result["reasons"].append(f"⚡ Auto-Executed on MT5 (Ticket #{exec_result['ticket']})")
                         telegram.send_trade_signal(
                             symbol=mt5_conn.active_symbol,
-                            timeframe=scalper_result.get("timeframe", "M5 Early Sniper"),
+                            timeframe=scalper_result.get("timeframe", "M5 Playbook"),
                             signal_data=scalper_result,
                             news_info=news_status.get("message", "")
                         )
                     else:
-                        logger.warning(f"Order not executed: {exec_result.get('message')}")
+                        logger.warning(f"Order skipped: {exec_result.get('message')}")
 
             # G. Update Console UI Dashboard
             ui.render_dashboard(
@@ -125,7 +125,8 @@ def main():
                 account_info=account_info,
                 news_status=news_status,
                 scalper_result=scalper_result,
-                session_desc=scalper_result.get("session_desc", "Active")
+                session_desc=scalper_result.get("session_desc", "Active"),
+                perf_info=perf_info
             )
             time.sleep(scan_interval)
 

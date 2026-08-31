@@ -3,6 +3,13 @@ auto_trading:
   enable_auto_break_even: true
   enable_trailing_stop: true
   max_open_trades: 2
+money_management:
+  daily_max_loss_usd: 40.0
+  daily_profit_target_usd: 50.0
+  max_sl_pips: 45.0
+  min_sl_pips: 25.0
+  risk_per_trade_percent: 1.0
+  sl_buffer_pips: 3.5
 mt5:
   login: 0
   password: ''
@@ -32,6 +39,10 @@ strategy:
   higher_timeframe: H1
   min_confluence_score: 3
   name: Gold SMC and Price Action Sniper
+  playbooks:
+    enable_dip_buying: true
+    enable_rally_selling: true
+    enable_trend_run: true
   require_candle_confirmation: true
   require_fvg_or_ob: true
   require_liquidity_sweep: true
@@ -43,6 +54,7 @@ strategy:
     - end: '23:45'
       start: '19:00'
     enable_session_filter: true
+  strict_trend_following: true
   trend_timeframe: M15
 system:
   log_level: INFO

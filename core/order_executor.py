@@ -1,10 +1,10 @@
 ﻿# ==========================================================
-# Institutional MT5 Auto-Execution & Trade Management Engine
+# Institutional MT5 Auto-Execution & Money Management Engine
 # ==========================================================
 import logging
 import MetaTrader5 as mt5
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 logger = logging.getLogger("OrderExecutor")
@@ -12,10 +12,10 @@ logger = logging.getLogger("OrderExecutor")
 class OrderExecutor:
     """
     Handles institutional-grade auto-execution directly on MetaTrader 5:
-    1. Sub-second market order placement with precise SL & TP.
-    2. Auto Break-Even (BE) at 1:1 RR to guarantee risk-free trades.
-    3. Trailing Stop Management.
-    4. Max Daily Drawdown Protection & News Circuit Breaker.
+    1. Daily Profit Target & Daily Max Loss Circuit Breaker.
+    2. Sub-second market order placement with precise SL & TP.
+    3. Auto Break-Even (BE) at 1:1 RR to guarantee risk-free trades.
+    4. Trailing Stop Management.
     """
 
     MAGIC_NUMBER = 778899  # Unique ID for our AI Sniper Bot
@@ -23,20 +23,52 @@ class OrderExecutor:
     def __init__(self, config: dict, mt5_connector):
         self.config = config
         self.mt5_conn = mt5_connector
-        self.risk_config = config.get("risk", {})
-        self.max_daily_signals = self.risk_config.get("max_daily_signals", 6)
+        
+        self.mm_config = config.get("money_management", {})
+        self.daily_profit_target = self.mm_config.get("daily_profit_target_usd", 50.0)
+        self.daily_max_loss = self.mm_config.get("daily_max_loss_usd", 40.0)
         
         self.auto_trade_enabled = config.get("auto_trading", {}).get("enable", True)
         self.auto_be_enabled = config.get("auto_trading", {}).get("enable_auto_break_even", True)
         self.trailing_stop_enabled = config.get("auto_trading", {}).get("enable_trailing_stop", True)
         
         self.local_tz = pytz.timezone("Asia/Bangkok")
-        self.daily_trade_count = 0
-        self.last_trade_date = None
+
+    def get_daily_performance(self) -> dict:
+        """Calculates today's realized PnL from MT5 trade deals."""
+        now = datetime.now(self.local_tz)
+        today_start = datetime(now.year, now.month, now.day, 0, 0, 0)
+        
+        deals = mt5.history_deals_get(today_start, now)
+        if not deals:
+            return {"profit": 0.0, "trades_count": 0, "wins": 0, "losses": 0}
+
+        total_profit = 0.0
+        wins = 0
+        losses = 0
+        trades_count = 0
+
+        for d in deals:
+            if d.magic == self.MAGIC_NUMBER and d.entry == mt5.DEAL_ENTRY_OUT:
+                p = d.profit + d.swap + d.commission
+                total_profit += p
+                trades_count += 1
+                if p > 0:
+                    wins += 1
+                elif p < 0:
+                    losses += 1
+
+        return {
+            "profit": round(total_profit, 2),
+            "trades_count": trades_count,
+            "wins": wins,
+            "losses": losses
+        }
 
     def execute_trade(self, signal_data: dict, current_price: dict) -> dict:
         """
         Executes a live Market Order on MT5 within milliseconds.
+        Enforces Daily Profit Target & Daily Max Loss rules.
         """
         if not self.auto_trade_enabled:
             return {"success": False, "message": "Auto-trading is disabled in config"}
@@ -45,14 +77,17 @@ class OrderExecutor:
         if not symbol:
             return {"success": False, "message": "No active MT5 symbol found"}
 
-        # Reset daily trade counter if new day
-        today = datetime.now(self.local_tz).date()
-        if self.last_trade_date != today:
-            self.last_trade_date = today
-            self.daily_trade_count = 0
+        # Check Daily Goals & Circuit Breaker
+        perf = self.get_daily_performance()
+        if perf["profit"] >= self.daily_profit_target:
+            msg = f"🎯 Daily Profit Target (${self.daily_profit_target:.2f}) Achieved (+${perf['profit']:.2f})! Bot paused for today."
+            logger.info(msg)
+            return {"success": False, "message": msg}
 
-        if self.daily_trade_count >= self.max_daily_signals:
-            return {"success": False, "message": f"Max daily trades limit ({self.max_daily_signals}) reached"}
+        if perf["profit"] <= -self.daily_max_loss:
+            msg = f"🛑 Daily Max Loss (-${self.daily_max_loss:.2f}) Hit (-${abs(perf['profit']):.2f})! Circuit breaker triggered."
+            logger.warning(msg)
+            return {"success": False, "message": msg}
 
         action = signal_data.get("signal", "")
         trade_setup = signal_data.get("trade_setup", {})
@@ -96,7 +131,7 @@ class OrderExecutor:
             "tp": round(tp, digits),
             "deviation": 20,
             "magic": self.MAGIC_NUMBER,
-            "comment": f"Gold_AI_{action}",
+            "comment": f"AI_{action}",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling_mode,
         }
@@ -113,7 +148,6 @@ class OrderExecutor:
             logger.error(f"MT5 Order Failed. Retcode: {result.retcode} ({result.comment})")
             return {"success": False, "message": f"Retcode {result.retcode}: {result.comment}"}
 
-        self.daily_trade_count += 1
         logger.info(f"✅ MT5 ORDER EXECUTED SUCCESSFULLY! Ticket: #{result.order} | Price: {result.price}")
         
         return {
@@ -159,7 +193,7 @@ class OrderExecutor:
             # AUTO BREAK-EVEN (BE) LOGIC
             if self.auto_be_enabled:
                 if pos_type == mt5.ORDER_TYPE_BUY:
-                    initial_risk = open_price - current_sl if current_sl > 0 else (20 * pip_size)
+                    initial_risk = open_price - current_sl if current_sl > 0 else (25 * pip_size)
                     profit_distance = cur_price - open_price
                     if profit_distance >= initial_risk and current_sl < open_price:
                         new_sl = round(open_price + (2 * pip_size), digits)
@@ -172,11 +206,11 @@ class OrderExecutor:
                         }
                         res = mt5.order_send(req)
                         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"🛡️ AUTO BREAK-EVEN: Ticket #{ticket} SL moved to {new_sl}")
+                            logger.info(f"🛡️ AUTO BREAK-EVEN: Ticket #{ticket} SL moved to {new_sl} (Risk-Free!)")
                             updates.append(f"🛡️ Ticket #{ticket}: SL moved to Break-Even (${new_sl})")
 
                 elif pos_type == mt5.ORDER_TYPE_SELL:
-                    initial_risk = current_sl - open_price if current_sl > 0 else (20 * pip_size)
+                    initial_risk = current_sl - open_price if current_sl > 0 else (25 * pip_size)
                     profit_distance = open_price - cur_price
                     if profit_distance >= initial_risk and (current_sl > open_price or current_sl == 0):
                         new_sl = round(open_price - (2 * pip_size), digits)
@@ -189,7 +223,7 @@ class OrderExecutor:
                         }
                         res = mt5.order_send(req)
                         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"🛡️ AUTO BREAK-EVEN: Ticket #{ticket} SL moved to {new_sl}")
+                            logger.info(f"🛡️ AUTO BREAK-EVEN: Ticket #{ticket} SL moved to {new_sl} (Risk-Free!)")
                             updates.append(f"🛡️ Ticket #{ticket}: SL moved to Break-Even (${new_sl})")
 
         return updates

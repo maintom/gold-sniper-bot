@@ -92,7 +92,7 @@ class TestGoldBot(unittest.TestCase):
         self.assertTrue(trade['is_valid'])
         self.assertGreater(trade['recommended_lot'], 0)
         self.assertEqual(trade['entry'], 2500.0)
-        self.assertEqual(trade['sl'], 2497.80)
+        self.assertEqual(trade['sl'], 2497.50)
         print('Risk Manager Calculation: PASSED')
 
 if __name__ == '__main__':
