@@ -1,26 +1,24 @@
 ﻿# ==========================================================
-# Institutional Top-Down MT5 Execution & Multi-Tier Trailing Engine
+# Institutional Real-Account MT5 Execution & Armor Engine
 # ==========================================================
 import logging
 import MetaTrader5 as mt5
 import pandas as pd
 from datetime import datetime, timedelta
 import pytz
+from strategy.risk_manager import RiskManager
 
 logger = logging.getLogger("OrderExecutor")
 
 class OrderExecutor:
     """
-    Institutional MT5 Auto-Execution Engine:
-    1. Single Position Rule (Max 1 Active Trade at any time - Zero Overtrading).
-    2. Auto-Clean all orphan pending limit orders.
-    3. 3-Minute Post-Trade Cooldown (Prevents rapid machine-gun spam).
-    4. Two Distinct Modes: Quick Scalp (1 ไม้จบ 0.04 Lot) vs Trend Runner (0.02 + 0.01 Pyramid).
-    5. Multi-Tier Dynamic Trailing Stop Engine (ขยับล็อคกำไรเป็นขั้นบันได):
-       - Tier 1 (+10 pips): Lock SL at Entry + 2.0 pips (Zero Risk).
-       - Tier 2 (+20 pips): Lock SL at Entry + 10.0 pips (Guaranteed Profit).
-       - Tier 3 (+30 pips): Lock SL at Entry + 20.0 pips (Big Profit Lock).
-       - Tier 4 (+40+ pips): Dynamic Trailing by 10 pips step until TP.
+    Institutional Real-Account Execution & Armor Engine:
+    1. Real Account Broker Shield (Spread clamp <= 3.5 pips, Deviation 15, IOC filling).
+    2. Consecutive Loss Safe-Mode (30-min pause if 2 consecutive losses occur).
+    3. Micro to Large Account Dynamic Lot Scaling ($50 to $10,000+).
+    4. Zero-Risk Free-Ride Pyramiding (Max 2 positions only if Pos 1 is in +20p profit & BE locked).
+    5. Multi-Tier Dynamic Trailing Stop Engine (ขยับล็อคกำไรเป็นขั้นบันได).
+    6. Auto-Clean all orphan pending limit orders.
     """
 
     MAGIC_NUMBER = 778899
@@ -28,6 +26,7 @@ class OrderExecutor:
     def __init__(self, config: dict, mt5_connector):
         self.config = config
         self.mt5_conn = mt5_connector
+        self.risk_manager = RiskManager(config)
         
         self.mm_config = config.get("money_management", {})
         self.daily_profit_target = self.mm_config.get("daily_profit_target_usd", 500.0)
@@ -39,7 +38,8 @@ class OrderExecutor:
         
         self.local_tz = pytz.timezone("Asia/Bangkok")
         self.last_trade_closed_time = datetime.min
-        self.cooldown_seconds = 180  # Strict 3-Minute Cooldown after trade closes
+        self.cooldown_seconds = 180  # 3-Minute standard cooldown
+        self.consecutive_loss_cooldown_seconds = 1800  # 30-Minute Safe-Mode if 2 consecutive losses
 
     def clean_all_pending_orders(self) -> int:
         """Cancels all orphaned pending limit orders to keep chart 100% clean."""
@@ -60,39 +60,49 @@ class OrderExecutor:
         return cleaned
 
     def get_daily_performance(self) -> dict:
-        """Calculates today's realized PnL from MT5 trade deals."""
+        """Calculates today's realized PnL and consecutive loss streak."""
         from_time = datetime.now() - timedelta(days=2)
         to_time = datetime.now() + timedelta(days=1)
         
         deals = mt5.history_deals_get(from_time, to_time)
         if not deals:
-            return {"profit": 0.0, "trades_count": 0, "wins": 0, "losses": 0}
+            return {"profit": 0.0, "trades_count": 0, "wins": 0, "losses": 0, "consecutive_losses": 0}
 
         total_profit = 0.0
         wins = 0
         losses = 0
         trades_count = 0
+        closed_deals = []
 
         for d in deals:
             if d.magic == self.MAGIC_NUMBER and d.entry == mt5.DEAL_ENTRY_OUT:
                 p = d.profit + d.swap + d.commission
                 total_profit += p
                 trades_count += 1
+                closed_deals.append(p)
                 if p > 0:
                     wins += 1
                 elif p < 0:
                     losses += 1
 
+        consecutive_losses = 0
+        for p in reversed(closed_deals):
+            if p < 0:
+                consecutive_losses += 1
+            else:
+                break
+
         return {
             "profit": round(total_profit, 2),
             "trades_count": trades_count,
             "wins": wins,
-            "losses": losses
+            "losses": losses,
+            "consecutive_losses": consecutive_losses
         }
 
     def execute_trade(self, signal_data: dict, current_price: dict) -> dict:
         """
-        Executes institutional trade with strict Single Position Rule & Cooldown.
+        Executes institutional trade with Real-Account Armor and Free-Ride Pyramiding.
         """
         if not self.auto_trade_enabled:
             return {"success": False, "message": "Auto-trading disabled"}
@@ -101,26 +111,13 @@ class OrderExecutor:
         if not symbol:
             return {"success": False, "message": "No active symbol"}
 
-        # Spread Protection Check
-        max_spread = self.config.get("system", {}).get("max_spread_pips", 4.5)
+        # 1. Real Account Broker Spread Protection Shield
+        max_spread = self.config.get("system", {}).get("max_spread_pips", 3.5)
         current_spread = current_price.get("spread_pips", 2.0)
         if current_spread > max_spread:
-            return {"success": False, "message": f"Spread too wide ({current_spread} pips > {max_spread} pips)"}
+            return {"success": False, "message": f"Spread Shield: {current_spread} pips > {max_spread} pips"}
 
-        # 1. HARD RULE: Max 1 Active Position at a time (Zero Machine-Gun Stacking!)
-        active_pos = [p for p in (mt5.positions_get(symbol=symbol) or []) if p.magic == self.MAGIC_NUMBER]
-        active_ord = [o for o in (mt5.orders_get(symbol=symbol) or []) if o.magic == self.MAGIC_NUMBER]
-        
-        if len(active_pos) > 0 or len(active_ord) > 0:
-            return {"success": False, "message": f"Position lock: {len(active_pos)} open, {len(active_ord)} pending"}
-
-        # 2. HARD RULE: 3-Minute Post-Trade Cooldown
-        time_since_closed = (datetime.now() - self.last_trade_closed_time).total_seconds()
-        if time_since_closed < self.cooldown_seconds:
-            rem = int(self.cooldown_seconds - time_since_closed)
-            return {"success": False, "message": f"Cooldown active: {rem}s remaining"}
-
-        # 3. Check Daily Goals & Circuit Breaker
+        # 2. Performance & Daily Circuit Breaker Check
         perf = self.get_daily_performance()
         if perf["profit"] >= self.daily_profit_target:
             return {"success": False, "message": f"🎯 Daily Profit Target (${self.daily_profit_target:.2f}) Achieved!"}
@@ -128,9 +125,33 @@ class OrderExecutor:
         if perf["profit"] <= -self.daily_max_loss:
             return {"success": False, "message": f"🛑 Circuit Breaker Hit (-${self.daily_max_loss:.2f})"}
 
+        # 3. Consecutive Loss Safe-Mode Gate (30 mins cooldown if 2 consecutive losses)
+        active_cooldown = self.consecutive_loss_cooldown_seconds if perf["consecutive_losses"] >= 2 else self.cooldown_seconds
+        time_since_closed = (datetime.now() - self.last_trade_closed_time).total_seconds()
+        if time_since_closed < active_cooldown:
+            rem = int(active_cooldown - time_since_closed)
+            return {"success": False, "message": f"Safe-Mode Cooldown active: {rem}s remaining"}
+
+        trade_mode = signal_data.get("trade_mode", "QUICK_SCALP")
+        active_pos = [p for p in (mt5.positions_get(symbol=symbol) or []) if p.magic == self.MAGIC_NUMBER]
+        active_ord = [o for o in (mt5.orders_get(symbol=symbol) or []) if o.magic == self.MAGIC_NUMBER]
+
+        # 4. Position Gate & Free-Ride Pyramiding Rule
+        if len(active_pos) > 0:
+            # Allow 1 Pyramid Order ONLY IF: Trend Runner + Pos 1 is in +20 pips profit + SL > Entry
+            pip_size = current_price.get("pip_size", 0.10)
+            p1 = active_pos[0]
+            is_buy = (p1.type == mt5.ORDER_TYPE_BUY)
+            p1_profit_pips = (p1.price_current - p1.price_open)/pip_size if is_buy else (p1.price_open - p1.price_current)/pip_size
+            is_p1_be_locked = (p1.sl >= p1.price_open) if is_buy else (p1.sl <= p1.price_open and p1.sl > 0)
+
+            if trade_mode == "TREND_RUNNER" and len(active_pos) == 1 and p1_profit_pips >= 20.0 and is_p1_be_locked:
+                logger.info("🚀 Free-Ride Pyramid Gate UNLOCKED: Pos 1 is +20p in profit & BE locked!")
+            else:
+                return {"success": False, "message": f"Position lock: {len(active_pos)} open, {len(active_ord)} pending"}
+
         action = signal_data.get("signal", "")
         trade_setup = signal_data.get("trade_setup", {})
-        trade_mode = signal_data.get("trade_mode", "QUICK_SCALP")
 
         if not trade_setup or action not in ["BUY", "SELL"]:
             return {"success": False, "message": "Invalid trade setup"}
@@ -139,7 +160,6 @@ class OrderExecutor:
         if not sym_info:
             return {"success": False, "message": "Failed to get symbol info"}
 
-        # Clean any old pending orders before entering
         self.clean_all_pending_orders()
 
         filling_mode = mt5.ORDER_FILLING_IOC
@@ -153,13 +173,11 @@ class OrderExecutor:
 
         digits = sym_info.digits
         step = sym_info.volume_step if sym_info.volume_step > 0 else 0.01
+        acc_balance = self.mt5_conn.get_account_info().get("balance", 1000.0)
 
-        # Lot Sizing
-        if trade_mode == "TREND_RUNNER":
-            lot = 0.02
-        else:
-            lot = 0.04
-
+        # Dynamic Lot Sizing
+        sl_pips = trade_setup.get("sl_pips", 25.0)
+        lot = self.risk_manager.calculate_lot(acc_balance, sl_pips, trade_mode)
         lot = round(round(lot / step) * step, 2)
         lot = max(sym_info.volume_min, min(sym_info.volume_max, lot))
 
@@ -176,7 +194,7 @@ class OrderExecutor:
             "price": round(price, digits),
             "sl": round(sl, digits),
             "tp": round(tp, digits),
-            "deviation": 20,
+            "deviation": 15,  # 1.5 pips max slippage guard
             "magic": self.MAGIC_NUMBER,
             "comment": f"AI_{action}_{trade_mode[:5]}",
             "type_time": mt5.ORDER_TIME_GTC,
@@ -217,7 +235,6 @@ class OrderExecutor:
 
         positions = mt5.positions_get(symbol=symbol)
         
-        # If all positions are closed, record close time and clean pending limits
         if not positions or not any(p.magic == self.MAGIC_NUMBER for p in positions):
             if (datetime.now() - self.last_trade_closed_time).total_seconds() > 3600:
                 self.last_trade_closed_time = datetime.now()
