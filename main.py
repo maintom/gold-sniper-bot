@@ -30,17 +30,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MainBot")
 
+def prompt_daily_goal_setup(config: dict, account_balance: float):
+    """Allows user to set manual daily profit target and loss limits on startup."""
+    mm = config.get("money_management", {})
+    default_target = float(mm.get("daily_profit_target_usd", 300.0))
+    default_loss = float(mm.get("daily_max_loss_usd", round(account_balance * 0.10, 2)))
+
+    print("\n" + "=" * 60)
+    print(" 🎯 INSTITUTIONAL DAILY GOAL & MONEY MANAGEMENT SETUP")
+    print("=" * 60)
+    print(f" 💰 ยอดบาลานซ์พอร์ตปัจจุบัน : ${account_balance:,.2f}")
+    print(f" 🎯 ค่าเริ่มต้นเป้าหมายกำไร  : +${default_target:,.2f}")
+    print(f" 🛑 ค่าเริ่มต้นขีดจำกัดขาดทุน : -${default_loss:,.2f} (10% MM Rule)")
+    print("-" * 60)
+
+    try:
+        user_target = input(f" 👉 ใส่เป้าหมายกำไรวันนี้ (ดอลลาร์) [กด Enter = {default_target}]: ").strip()
+        if user_target:
+            default_target = float(user_target)
+
+        user_loss = input(f" 👉 ใส่ขีดจำกัดขาดทุนสูงสุด (ดอลลาร์) [กด Enter = {default_loss}]: ").strip()
+        if user_loss:
+            default_loss = float(user_loss)
+
+        config["money_management"]["daily_profit_target_usd"] = default_target
+        config["money_management"]["daily_max_loss_usd"] = default_loss
+        with open("config.yaml", "w", encoding="utf-8") as f:
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+
+        print(f" ✅ บันทึกเป้าหมาย: กำไร +${default_target:,.2f} | ขาดทุนสูงสุด -${default_loss:,.2f}")
+        print("=" * 60 + "\n")
+        time.sleep(1)
+    except Exception as e:
+        print(f" ใช้ค่าเริ่มต้นอัตโนมัติ: กำไร +${default_target:,.2f}")
+
 def main():
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-
-    ui = ConsoleUI()
 
     # 1. Connect to MT5
     mt5_conn = MT5Connector(config)
     if not mt5_conn.connect():
         print("[-] Failed to connect to MetaTrader 5. Please ensure MT5 terminal is open.")
         return
+
+    account_info = mt5_conn.get_account_info()
+    balance = account_info.get("balance", 1000.0)
+
+    # Interactive Daily Goal Setup Prompt
+    prompt_daily_goal_setup(config, balance)
+
+    ui = ConsoleUI()
 
     # 2. Initialize Core Engines
     telegram = TelegramNotifier(config)
@@ -59,6 +99,9 @@ def main():
 
     while True:
         try:
+            # Refresh config dynamically (in case updated via Telegram /setgoal)
+            mm_cfg = config.get("money_management", {})
+
             # A. Fetch Real-time Tick, Account Info & Daily Performance
             price_info = mt5_conn.get_price()
             account_info = mt5_conn.get_account_info()
@@ -130,7 +173,8 @@ def main():
                 news_status=news_status,
                 scalper_result=scalper_result,
                 session_desc=scalper_result.get("session_desc", "Active"),
-                perf_info=perf_info
+                perf_info=perf_info,
+                mm_config=mm_cfg
             )
             time.sleep(scan_interval)
 
@@ -138,6 +182,7 @@ def main():
             print("Bot stopped by user.")
             break
         except Exception as e:
+            logger.error(f"Error in main loop: {e}")
             time.sleep(scan_interval)
 
 if __name__ == "__main__":

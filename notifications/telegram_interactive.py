@@ -110,6 +110,37 @@ class TelegramInteractive:
 
         if not text:
             return
+        # Command: /setgoal or natural goal setting
+        if text.startswith("/setgoal") or text.startswith("/target") or "????????" in text:
+            parts = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", text)
+            if parts:
+                target_p = float(parts[0])
+                max_l = float(parts[1]) if len(parts) > 1 else round(account_info.get("balance", 1000.0) * 0.10, 2)
+                
+                # Update config
+                try:
+                    with open(self.config_path, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f)
+                    cfg["money_management"]["daily_profit_target_usd"] = target_p
+                    cfg["money_management"]["daily_max_loss_usd"] = max_l
+                    with open(self.config_path, "w", encoding="utf-8") as f:
+                        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+                    
+                    reply = (
+                        f"?? <b>????????????????????????????!</b>\n"
+                        f"????????????????????\n"
+                        f"?? <b>????????????:</b> <code>+${target_p:.2f}</code>\n"
+                        f"?? <b>?????????????????:</b> <code>-${max_l:.2f}</code> (10% MM)\n"
+                        f"?? <b>???????????????:</b> ${account_info.get('balance', 0.0):,.2f}\n"
+                        f"?? <b>???????????????:</b> ${account_info.get('balance', 0.0) + target_p:,.2f}\n"
+                        f"????????????????????\n"
+                        f"?? <i>????????????????????????????????????????????????!</i>"
+                    )
+                    self.send_message(reply, target_chat_id=sender_chat_id)
+                    return
+                except Exception as e:
+                    logger.error(f"Error setting goal via telegram: {e}")
+
 
         # Save chat_id if not present
         if not self.chat_id or str(self.chat_id) != sender_chat_id:

@@ -18,7 +18,7 @@ class ConsoleUI:
 
     def render_dashboard(self, symbol: str, price_info: dict, account_info: dict, 
                          news_status: dict, scalper_result: dict, session_desc: str,
-                         perf_info: dict = None):
+                         perf_info: dict = None, mm_config: dict = None):
         now_str = datetime.now(self.local_tz).strftime("%Y-%m-%d %H:%M:%S")
 
         # Top Header
@@ -52,6 +52,24 @@ class ConsoleUI:
 
         info_table.add_row(symbol or "Searching...", f"{bid} / {ask}", spread, balance, equity, pnl_str)
 
+        # Daily Target & MM Goal Panel
+        target_usd = mm_config.get("daily_profit_target_usd", 300.0) if mm_config else 300.0
+        max_loss = mm_config.get("daily_max_loss_usd", 150.0) if mm_config else 150.0
+        
+        progress_pct = max(0.0, min(100.0, (pnl_val / target_usd * 100.0))) if target_usd > 0 else 0.0
+        filled_bars = int(progress_pct / 5)
+        bar_visual = "█" * filled_bars + "░" * (20 - filled_bars)
+        rem_usd = max(0.0, target_usd - pnl_val)
+        
+        target_text = (
+            f"🎯 [bold yellow]เป้าหมายกำไรวันนี้:[/bold yellow] [bold green]+${target_usd:,.2f}[/bold green] | "
+            f"ยอดสะสม: [{pnl_color}]${pnl_val:+,.2f}[/{pnl_color}] | "
+            f"ขาดอีก: [bold cyan]${rem_usd:,.2f}[/bold cyan]\n"
+            f"📈 ความคืบหน้า: [{bar_visual}] {progress_pct:.1f}% | "
+            f"🛑 ขีดจำกัดขาดทุน (Circuit Breaker): [bold red]-${max_loss:,.2f}[/bold red]"
+        )
+        target_panel = Panel(target_text, title="[+] Daily Money Management & Target Monitor", border_style="cyan")
+
         # News Shield Status Panel
         news_style = "bold green" if news_status.get("is_safe", True) else "bold red"
         news_msg = news_status.get("message", "N/A")
@@ -76,7 +94,7 @@ class ConsoleUI:
             sig_header = f"[-] 📉 SELL SIGNAL TRIGGERED ({tf_badge}) {stars}"
         else:
             border = "blue"
-            sig_header = f"[*] MARKET SCANNING / WAITING FOR PLAYBOOK SETUP ({tf_badge})"
+            sig_header = f"[*] MARKET SCANNING / WAITING FOR SMC SETUP ({tf_badge})"
 
         sig_lines = [sig_header, ""]
         if trade:
@@ -102,5 +120,6 @@ class ConsoleUI:
         console.clear()
         console.print(Panel(header_text, border_style="yellow"))
         console.print(info_table)
+        console.print(target_panel)
         console.print(news_panel)
         console.print(signal_panel)
