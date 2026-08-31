@@ -5,7 +5,7 @@ auto_trading:
   max_open_trades: 2
 money_management:
   daily_max_loss_usd: 300.0
-  daily_profit_target_usd: 500.0
+  daily_profit_target_usd: 300.0
   max_sl_pips: 45.0
   min_sl_pips: 25.0
   risk_per_trade_percent: 1.0
