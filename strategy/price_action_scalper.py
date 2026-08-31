@@ -28,7 +28,7 @@ class PriceActionScalper:
         self.allowed_ranges = self.sessions.get("allowed_ranges_bkk", [])
         
         self.risk_manager = RiskManager(config)
-        self.macro_engine = MacroLevelsEngine(tolerance_pips=30.0)
+        self.macro_engine = MacroLevelsEngine(tolerance_pips=25.0)
         self.local_tz = pytz.timezone("Asia/Bangkok")
         self.last_signal_time = None
 
@@ -48,15 +48,55 @@ class PriceActionScalper:
 
         return False, f"Outside optimal trading sessions (Current BKK: {current_hm})"
 
+    def scan_all_timeframes(self, candles_m1: pd.DataFrame, candles_m5: pd.DataFrame, 
+                            candles_m15: pd.DataFrame, candles_h1: pd.DataFrame, 
+                            candles_d1: pd.DataFrame, current_price: dict, 
+                            news_status: dict, account_balance: float = 1000.0) -> dict:
+        """
+        Scans M5, M15, and M1 timeframes concurrently to find any Grade A/A+ sniper setup.
+        """
+        # 1. Update Macro & Intraday Levels from D1, H1, M5
+        self.macro_engine.update_from_candles(candles_d1, candles_h1, candles_m5)
+
+        # 2. Check M5 first (Primary Scalp)
+        res_m5 = self.analyze_tf("M5", candles_m5, candles_m15, candles_h1, current_price, news_status, account_balance)
+        if res_m5["signal"] in ["BUY", "SELL"]:
+            res_m5["timeframe"] = "M5"
+            return res_m5
+
+        # 3. Check M15 (Intraday Swing)
+        res_m15 = self.analyze_tf("M15", candles_m15, candles_h1, candles_d1, current_price, news_status, account_balance)
+        if res_m15["signal"] in ["BUY", "SELL"]:
+            res_m15["timeframe"] = "M15"
+            return res_m15
+
+        # 4. Check M1 (Micro Scalp)
+        if candles_m1 is not None and len(candles_m1) >= 30:
+            res_m1 = self.analyze_tf("M1", candles_m1, candles_m5, candles_m15, current_price, news_status, account_balance)
+            if res_m1["signal"] in ["BUY", "SELL"]:
+                res_m1["timeframe"] = "M1"
+                return res_m1
+
+        res_m5["timeframe"] = "M5"
+        return res_m5
+
     def analyze(self, candles_m1: pd.DataFrame, candles_m5: pd.DataFrame, 
                 candles_m15: pd.DataFrame, candles_h1: pd.DataFrame, 
                 candles_d1: pd.DataFrame, current_price: dict, 
                 news_status: dict, account_balance: float = 1000.0) -> dict:
-        """
-        Performs full multi-timeframe precision analysis with Macro Levels & AI Probability.
-        """
+        """Standard wrapper mapping to scan_all_timeframes."""
+        return self.scan_all_timeframes(
+            candles_m1, candles_m5, candles_m15, candles_h1, candles_d1,
+            current_price, news_status, account_balance
+        )
+
+    def analyze_tf(self, tf_name: str, entry_df: pd.DataFrame, 
+                   trend_df: pd.DataFrame, higher_df: pd.DataFrame, 
+                   current_price: dict, news_status: dict, 
+                   account_balance: float = 1000.0) -> dict:
         result = {
             "signal": "WAIT",
+            "timeframe": tf_name,
             "confluence_score": 0,
             "stars": "",
             "win_probability": 0.0,
@@ -85,31 +125,24 @@ class PriceActionScalper:
             result["reasons"].append(f"⏳ {session_desc}")
             return result
 
-        # 3. Update Macro Historical Levels (Daily / Weekly / Monthly)
-        if candles_d1 is not None and len(candles_d1) >= 5:
-            self.macro_engine.update_from_candles(candles_d1)
-
         mid_price = current_price.get("mid", 2500.0)
         pip_size = current_price.get("pip_size", 0.10)
         macro_info = self.macro_engine.check_macro_confluence(mid_price, pip_size)
         result["macro_zone"] = macro_info.get("description", "None")
 
-        # Select primary entry DataFrame
-        entry_df = candles_m5 if self.entry_tf == "M5" else candles_m1
-        if len(entry_df) < 30 or len(candles_m15) < 30:
-            result["reasons"].append("Insufficient historical candle data.")
+        if entry_df is None or len(entry_df) < 25 or trend_df is None or len(trend_df) < 20:
+            result["reasons"].append("Insufficient candle data.")
             return result
 
-        # 4. Higher Timeframe Market Structure (H1 / M15)
-        h1_struct = SMCEngine.analyze_market_structure(candles_h1) if len(candles_h1) >= 20 else {"trend": "NEUTRAL"}
-        m15_struct = SMCEngine.analyze_market_structure(candles_m15)
-        result["htf_trend"] = f"H1:{h1_struct['trend']} | M15:{m15_struct['trend']}"
+        # 3. Trend & Structure
+        higher_struct = SMCEngine.analyze_market_structure(higher_df) if higher_df is not None and len(higher_df) >= 20 else {"trend": "NEUTRAL"}
+        trend_struct = SMCEngine.analyze_market_structure(trend_df)
+        result["htf_trend"] = f"{trend_struct['trend']} (EMA50: {'ABOVE' if trend_struct.get('current_above_ema50') else 'BELOW'})"
 
-        # 5. Entry Timeframe Analysis (M5/M1)
+        # 4. Entry Analysis on target TF
         sweep_data = SMCEngine.detect_liquidity_sweep(entry_df, lookback=20)
         fvgs = SMCEngine.detect_fair_value_gaps(entry_df, max_lookback=10)
         
-        # Analyze last closed candle (index -2) and candle before it (index -3)
         bar_prev2 = entry_df.iloc[-3]
         bar_prev1 = entry_df.iloc[-2]
         
@@ -122,14 +155,14 @@ class PriceActionScalper:
         )
 
         mtf_metrics = {
-            "m15_trend": m15_struct["trend"],
-            "h1_trend": h1_struct["trend"],
-            "above_ema50": m15_struct.get("current_above_ema50", False)
+            "m15_trend": trend_struct["trend"],
+            "h1_trend": higher_struct.get("trend", trend_struct["trend"]),
+            "above_ema50": trend_struct.get("current_above_ema50", False)
         }
 
         # Check FVG tap
-        fvg_bullish_tap = any(f["type"] == "BULLISH_FVG" and f["bottom"] <= mid_price <= f["top"] + (2.0 * pip_size) for f in fvgs)
-        fvg_bearish_tap = any(f["type"] == "BEARISH_FVG" and f["bottom"] - (2.0 * pip_size) <= mid_price <= f["top"] for f in fvgs)
+        fvg_bullish_tap = any(f["type"] == "BULLISH_FVG" and f["bottom"] <= mid_price <= f["top"] + (3.0 * pip_size) for f in fvgs)
+        fvg_bearish_tap = any(f["type"] == "BEARISH_FVG" and f["bottom"] - (3.0 * pip_size) <= mid_price <= f["top"] for f in fvgs)
 
         # -------------------------------------------------------------
         # AI EVALUATION: BUY SETUP
@@ -211,5 +244,5 @@ class PriceActionScalper:
                 result["reasons"] = sell_reasons
                 return result
 
-        result["reasons"] = ["Market in consolidation / waiting for sniper confluence setup."]
+        result["reasons"] = [f"Market on {tf_name} in consolidation / waiting for sniper confluence setup."]
         return result

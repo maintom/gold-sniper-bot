@@ -172,7 +172,7 @@ def market_scanner_worker():
 
                     telegram.send_trade_signal(
                         symbol="XAUUSD",
-                        timeframe="M5",
+                        timeframe=scalper_result.get("timeframe", "M5"),
                         signal_data=scalper_result,
                         news_info=news_status.get("message", "")
                     )
