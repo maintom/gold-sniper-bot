@@ -1,5 +1,5 @@
 ﻿# ==========================================================
-# Gold Precision Scalping Assistant Bot - Main Orchestrator
+# Gold MT5 Auto-Execution Precision Scalper (Local Master Engine)
 # ==========================================================
 import sys
 if hasattr(sys.stdout, "reconfigure"):
@@ -7,83 +7,82 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import time
 import logging
-from datetime import datetime, timedelta
 import yaml
-import pytz
+import pandas as pd
+from datetime import datetime, timedelta
 
 from core.mt5_connector import MT5Connector
 from core.news_engine import NewsEngine
+from core.order_executor import OrderExecutor
 from strategy.price_action_scalper import PriceActionScalper
 from notifications.telegram_bot import TelegramNotifier
 from notifications.telegram_interactive import TelegramInteractive
-from notifications.console_ui import ConsoleUI
+from notifications.console_ui import ConsoleDashboard
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.FileHandler("logs/bot.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("Main")
-
-def load_config():
-    with open("config.yaml", "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+logger = logging.getLogger("MainBot")
 
 def main():
-    print("=" * 60)
-    print("Starting Gold Precision Scalping Assistant Bot (Exness MT5)")
-    print("=" * 60)
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
 
-    config = load_config()
+    ui = ConsoleDashboard()
+    ui.render_header("Gold AI Sniper (MT5 Auto-Trading Edition)")
 
-    # Initialize Components
-    news_engine = NewsEngine(config)
+    # 1. Connect to MT5
     mt5_conn = MT5Connector(config)
-    scalper = PriceActionScalper(config)
-    telegram = TelegramNotifier(config)
-    ui = ConsoleUI()
+    if not mt5_conn.connect():
+        ui.render_error("Failed to connect to MetaTrader 5. Please ensure MT5 terminal is open.")
+        return
 
-    # Start Telegram Interactive Bot
+    # 2. Initialize Core Engines
+    news_engine = NewsEngine(config)
+    scalper = PriceActionScalper(config)
+    executor = OrderExecutor(config, mt5_conn)
+    telegram = TelegramNotifier(config)
+
+    # 3. Start Interactive Telegram Listener
     tg_interactive = TelegramInteractive("config.yaml", news_engine, mt5_conn, scalper)
     tg_interactive.start()
 
-    # Connect to MT5
-    print("Connecting to MetaTrader 5...")
-    if not mt5_conn.connect():
-        print("\n[ERROR] Could not connect to MT5 or find Gold symbol.")
-        print("Please ensure:")
-        print("1. MetaTrader 5 is open and logged into your Exness account.")
-        print("2. Algo Trading / DLL imports are enabled in MT5 Tools -> Options -> Expert Advisors.")
-        print("3. Symbol XAUUSD / XAUUSDm is visible in Market Watch.")
-        sys.exit(1)
+    logger.info("Master Auto-Trading Bot initialized successfully.")
+    ui.render_system_ready(mt5_conn.active_symbol)
 
-    print(f"Connected to MT5! Active Gold Symbol: {mt5_conn.active_symbol}")
+    scan_interval = config.get("system", {}).get("scan_interval_seconds", 3)
+    last_dispatched_candle = None
+    last_dispatched_direction = None
+    last_dispatched_time = None
+    cooldown_minutes = 30
 
-    scan_interval = config.get("system", {}).get("scan_interval_seconds", 5)
-    last_signal_hash = None
-    last_signal_time = None
-    cooldown_minutes = 15  # Avoid spamming the same signal repeatedly
-
-    try:
-        while True:
-            # 1. Fetch Real-time price and account info
+    while True:
+        try:
+            # A. Fetch Real-time Tick & Account Info
             price_info = mt5_conn.get_price()
             account_info = mt5_conn.get_account_info()
-            balance = account_info.get("balance", 1000.0)
 
-            # 2. Fetch Multi-Timeframe Candle Data (including D1 for Macro levels)
+            # B. Manage Active Open Trades (Auto Break-Even & Trailing)
+            trade_updates = executor.manage_open_positions(price_info)
+            for upd in trade_updates:
+                telegram.send_message(f"🛡️ <b>[Auto Trade Manager]</b>\n{upd}")
+
+            # C. Fetch Multi-Timeframe OHLCV Candles
             candles_m1 = mt5_conn.get_candles("M1", count=100)
             candles_m5 = mt5_conn.get_candles("M5", count=100)
             candles_m15 = mt5_conn.get_candles("M15", count=100)
             candles_h1 = mt5_conn.get_candles("H1", count=100)
             candles_d1 = mt5_conn.get_candles("D1", count=60)
 
-            # 3. Check News Shield Status
+            # D. Check News Shield
             news_status = news_engine.check_shield()
 
-            # 4. Run Precision Scalper Analysis with Macro Levels & AI Probability
+            # E. Run Top-Down Institutional Analysis
             scalper_result = scalper.analyze(
                 candles_m1=candles_m1,
                 candles_m5=candles_m5,
@@ -92,59 +91,50 @@ def main():
                 candles_d1=candles_d1,
                 current_price=price_info,
                 news_status=news_status,
-                account_balance=balance
+                account_balance=account_info.get("balance", 1000.0)
             )
 
-            # 5. Handle Signal Dispatch & Cooldown
+            # F. Signal Trigger & Instant Auto-Execution
             sig = scalper_result.get("signal", "WAIT")
+            candle_time = scalper_result.get("candle_time")
+            now = datetime.now()
+
             if sig in ["BUY", "SELL"]:
-                now = datetime.now()
-                sig_hash = f"{sig}_{scalper_result.get('trade_setup', {}).get('entry')}"
-                
-                # Check cooldown
-                can_dispatch = False
-                if last_signal_hash != sig_hash:
-                    can_dispatch = True
-                elif last_signal_time and (now - last_signal_time) > timedelta(minutes=cooldown_minutes):
-                    can_dispatch = True
+                is_new_candle = (last_dispatched_candle != candle_time)
+                time_ok = (last_dispatched_time is None or (now - last_dispatched_time) > timedelta(minutes=cooldown_minutes))
+                is_reversal = (last_dispatched_direction is not None and last_dispatched_direction != sig)
 
-                if can_dispatch:
-                    last_signal_hash = sig_hash
-                    last_signal_time = now
-                    logger.info(f"NEW SIGNAL: {sig} on {mt5_conn.active_symbol} | Win Prob: {scalper_result.get('win_probability')}%")
+                if is_new_candle and (time_ok or is_reversal):
+                    last_dispatched_candle = candle_time
+                    last_dispatched_direction = sig
+                    last_dispatched_time = now
+
+                    logger.info(f"🚀 SNIPER SIGNAL DETECTED: {sig} ({scalper_result.get('win_probability')}%)")
+
+                    # 1. INSTANT AUTO-EXECUTION ON MT5 (0.02s)
+                    exec_result = executor.execute_trade(scalper_result, price_info)
+
+                    # 2. DISPATCH TELEGRAM ALERT
+                    if exec_result.get("success"):
+                        scalper_result["reasons"].append(f"⚡ Auto-Executed on MT5 (Ticket #{exec_result['ticket']})")
                     
-                    # Reload latest chat_id if updated
-                    current_cfg = load_config()
-                    telegram.chat_id = current_cfg.get("telegram", {}).get("chat_id", telegram.chat_id)
-                    telegram.enabled = current_cfg.get("telegram", {}).get("enable", True)
-
-                    # Dispatch to Telegram
                     telegram.send_trade_signal(
                         symbol=mt5_conn.active_symbol,
-                        timeframe=config.get("strategy", {}).get("entry_timeframe", "M5"),
+                        timeframe=scalper_result.get("timeframe", "M5 Early Sniper"),
                         signal_data=scalper_result,
                         news_info=news_status.get("message", "")
                     )
 
-            # 6. Render Terminal Dashboard
-            is_active, session_desc = scalper.is_session_active()
-            ui.render_dashboard(
-                symbol=mt5_conn.active_symbol,
-                price_info=price_info,
-                account_info=account_info,
-                news_status=news_status,
-                scalper_result=scalper_result,
-                session_desc=session_desc
-            )
-
+            # G. Update Console UI Dashboard
+            ui.update(price_info, account_info, news_status, scalper_result)
             time.sleep(scan_interval)
 
-    except KeyboardInterrupt:
-        print("\nStopping bot gracefully...")
-    finally:
-        tg_interactive.stop()
-        mt5_conn.shutdown()
-        print("MT5 connection closed. Bot stopped.")
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user.")
+            break
+        except Exception as e:
+            logger.error(f"Main loop error: {e}")
+            time.sleep(scan_interval)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -1,3 +1,8 @@
+auto_trading:
+  enable: true
+  enable_auto_break_even: true
+  enable_trailing_stop: true
+  max_open_trades: 2
 mt5:
   login: 0
   password: ''
