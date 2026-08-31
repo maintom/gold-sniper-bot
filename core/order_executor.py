@@ -66,12 +66,13 @@ class OrderExecutor:
 
         # Select filling mode supported by broker
         filling_mode = mt5.ORDER_FILLING_IOC
-        if sym_info.filling_mode & mt5.SYMBOL_FILLING_FOK:
-            filling_mode = mt5.ORDER_FILLING_FOK
-        elif sym_info.filling_mode & mt5.SYMBOL_FILLING_IOC:
-            filling_mode = mt5.ORDER_FILLING_IOC
-        elif sym_info.filling_mode & mt5.SYMBOL_FILLING_RETURN:
-            filling_mode = mt5.ORDER_FILLING_RETURN
+        if hasattr(sym_info, "filling_mode"):
+            if sym_info.filling_mode & 1:  # FOK
+                filling_mode = mt5.ORDER_FILLING_FOK
+            elif sym_info.filling_mode & 2:  # IOC
+                filling_mode = mt5.ORDER_FILLING_IOC
+            else:
+                filling_mode = mt5.ORDER_FILLING_RETURN
 
         # Sizing normalization
         lot = float(trade_setup.get("recommended_lot", 0.01))
@@ -144,7 +145,6 @@ class OrderExecutor:
         updates = []
 
         for pos in positions:
-            # Only manage trades opened by our bot
             if pos.magic != self.MAGIC_NUMBER:
                 continue
 
@@ -156,16 +156,13 @@ class OrderExecutor:
             cur_price = pos.price_current
             digits = pos.digits
 
-            # -------------------------------------------------------------
             # AUTO BREAK-EVEN (BE) LOGIC
-            # -------------------------------------------------------------
             if self.auto_be_enabled:
                 if pos_type == mt5.ORDER_TYPE_BUY:
                     initial_risk = open_price - current_sl if current_sl > 0 else (20 * pip_size)
                     profit_distance = cur_price - open_price
-                    # If profit >= 1.0x initial risk and SL still below entry
                     if profit_distance >= initial_risk and current_sl < open_price:
-                        new_sl = round(open_price + (2 * pip_size), digits)  # Entry + 2 pips buffer
+                        new_sl = round(open_price + (2 * pip_size), digits)
                         req = {
                             "action": mt5.TRADE_ACTION_SLTP,
                             "position": ticket,
@@ -175,15 +172,14 @@ class OrderExecutor:
                         }
                         res = mt5.order_send(req)
                         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"🛡️ AUTO BREAK-EVEN TRIGGERED: Ticket #{ticket} SL moved to {new_sl} (Risk-Free!)")
+                            logger.info(f"🛡️ AUTO BREAK-EVEN: Ticket #{ticket} SL moved to {new_sl}")
                             updates.append(f"🛡️ Ticket #{ticket}: SL moved to Break-Even (${new_sl})")
 
                 elif pos_type == mt5.ORDER_TYPE_SELL:
                     initial_risk = current_sl - open_price if current_sl > 0 else (20 * pip_size)
                     profit_distance = open_price - cur_price
-                    # If profit >= 1.0x initial risk and SL still above entry
                     if profit_distance >= initial_risk and (current_sl > open_price or current_sl == 0):
-                        new_sl = round(open_price - (2 * pip_size), digits)  # Entry - 2 pips buffer
+                        new_sl = round(open_price - (2 * pip_size), digits)
                         req = {
                             "action": mt5.TRADE_ACTION_SLTP,
                             "position": ticket,
@@ -193,7 +189,7 @@ class OrderExecutor:
                         }
                         res = mt5.order_send(req)
                         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"🛡️ AUTO BREAK-EVEN TRIGGERED: Ticket #{ticket} SL moved to {new_sl} (Risk-Free!)")
+                            logger.info(f"🛡️ AUTO BREAK-EVEN: Ticket #{ticket} SL moved to {new_sl}")
                             updates.append(f"🛡️ Ticket #{ticket}: SL moved to Break-Even (${new_sl})")
 
         return updates

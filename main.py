@@ -17,14 +17,13 @@ from core.order_executor import OrderExecutor
 from strategy.price_action_scalper import PriceActionScalper
 from notifications.telegram_bot import TelegramNotifier
 from notifications.telegram_interactive import TelegramInteractive
-from notifications.console_ui import ConsoleDashboard
+from notifications.console_ui import ConsoleUI
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler("logs/bot.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
+        logging.FileHandler("logs/bot.log", encoding="utf-8")
     ]
 )
 logger = logging.getLogger("MainBot")
@@ -33,13 +32,12 @@ def main():
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    ui = ConsoleDashboard()
-    ui.render_header("Gold AI Sniper (MT5 Auto-Trading Edition)")
+    ui = ConsoleUI()
 
     # 1. Connect to MT5
     mt5_conn = MT5Connector(config)
     if not mt5_conn.connect():
-        ui.render_error("Failed to connect to MetaTrader 5. Please ensure MT5 terminal is open.")
+        print("[-] Failed to connect to MetaTrader 5. Please ensure MT5 terminal is open.")
         return
 
     # 2. Initialize Core Engines
@@ -51,9 +49,6 @@ def main():
     # 3. Start Interactive Telegram Listener
     tg_interactive = TelegramInteractive("config.yaml", news_engine, mt5_conn, scalper)
     tg_interactive.start()
-
-    logger.info("Master Auto-Trading Bot initialized successfully.")
-    ui.render_system_ready(mt5_conn.active_symbol)
 
     scan_interval = config.get("system", {}).get("scan_interval_seconds", 3)
     last_dispatched_candle = None
@@ -109,8 +104,6 @@ def main():
                     last_dispatched_direction = sig
                     last_dispatched_time = now
 
-                    logger.info(f"🚀 SNIPER SIGNAL DETECTED: {sig} ({scalper_result.get('win_probability')}%)")
-
                     # 1. INSTANT AUTO-EXECUTION ON MT5 (0.02s)
                     exec_result = executor.execute_trade(scalper_result, price_info)
 
@@ -126,14 +119,20 @@ def main():
                     )
 
             # G. Update Console UI Dashboard
-            ui.update(price_info, account_info, news_status, scalper_result)
+            ui.render_dashboard(
+                symbol=mt5_conn.active_symbol,
+                price_info=price_info,
+                account_info=account_info,
+                news_status=news_status,
+                scalper_result=scalper_result,
+                session_desc=scalper_result.get("session_desc", "Active")
+            )
             time.sleep(scan_interval)
 
         except KeyboardInterrupt:
-            logger.info("Bot stopped by user.")
+            print("Bot stopped by user.")
             break
         except Exception as e:
-            logger.error(f"Main loop error: {e}")
             time.sleep(scan_interval)
 
 if __name__ == "__main__":
