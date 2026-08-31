@@ -100,23 +100,22 @@ def main():
                 is_reversal = (last_dispatched_direction is not None and last_dispatched_direction != sig)
 
                 if is_new_candle and (time_ok or is_reversal):
-                    last_dispatched_candle = candle_time
-                    last_dispatched_direction = sig
-                    last_dispatched_time = now
-
                     # 1. INSTANT AUTO-EXECUTION ON MT5 (0.02s)
                     exec_result = executor.execute_trade(scalper_result, price_info)
 
-                    # 2. DISPATCH TELEGRAM ALERT
                     if exec_result.get("success"):
+                        last_dispatched_candle = candle_time
+                        last_dispatched_direction = sig
+                        last_dispatched_time = now
                         scalper_result["reasons"].append(f"⚡ Auto-Executed on MT5 (Ticket #{exec_result['ticket']})")
-                    
-                    telegram.send_trade_signal(
-                        symbol=mt5_conn.active_symbol,
-                        timeframe=scalper_result.get("timeframe", "M5 Early Sniper"),
-                        signal_data=scalper_result,
-                        news_info=news_status.get("message", "")
-                    )
+                        telegram.send_trade_signal(
+                            symbol=mt5_conn.active_symbol,
+                            timeframe=scalper_result.get("timeframe", "M5 Early Sniper"),
+                            signal_data=scalper_result,
+                            news_info=news_status.get("message", "")
+                        )
+                    else:
+                        logger.warning(f"Order not executed: {exec_result.get('message')}")
 
             # G. Update Console UI Dashboard
             ui.render_dashboard(
