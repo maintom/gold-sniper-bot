@@ -5,7 +5,6 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-import pytz
 import MetaTrader5 as mt5
 
 logger = logging.getLogger("TradeReflection")
@@ -21,7 +20,6 @@ class TradeReflectionEngine:
     def __init__(self, config: dict, telegram_notifier=None):
         self.config = config
         self.telegram = telegram_notifier
-        self.local_tz = pytz.timezone("Asia/Bangkok")
         self.memory = self._load_memory()
         self.processed_deal_tickets = set(self.memory.get("processed_tickets", []))
 
@@ -44,7 +42,7 @@ class TradeReflectionEngine:
 
     def _save_memory(self):
         try:
-            self.memory["processed_tickets"] = list(self.processed_deal_tickets)[-200:]
+            self.memory["processed_tickets"] = list(self.processed_deal_tickets)[-300:]
             with open(self.MEMORY_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.memory, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -55,10 +53,10 @@ class TradeReflectionEngine:
         Inspects recently closed deals in MT5, identifies wins/losses,
         and generates Post-Mortem reflection for each trade.
         """
-        now = datetime.now(self.local_tz)
-        today_start = datetime(now.year, now.month, now.day, 0, 0, 0)
+        from_time = datetime.now() - timedelta(days=2)
+        to_time = datetime.now() + timedelta(days=1)
         
-        deals = mt5.history_deals_get(today_start, now)
+        deals = mt5.history_deals_get(from_time, to_time)
         if not deals:
             return []
 
@@ -105,7 +103,7 @@ class TradeReflectionEngine:
                         "ticket": deal_id,
                         "type": "WIN",
                         "profit": profit,
-                        "time": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "message": f"🏆 ไม้ทำกำไร +${profit:.2f} ตามแผนการเทรดสำเร็จ!"
                     }
                     reflections.append(win_report)
@@ -127,7 +125,7 @@ class TradeReflectionEngine:
 
     def _analyze_loss(self, deal, profit: float, comment: str) -> dict:
         """Heuristic and ML analysis of why the trade failed."""
-        now_str = datetime.now(self.local_tz).strftime("%Y-%m-%d %H:%M:%S")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # Identify common loss modes
         if "sl" in comment.lower() or deal.reason == mt5.DEAL_REASON_SL:

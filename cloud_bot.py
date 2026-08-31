@@ -214,8 +214,9 @@ def init_background_workers():
         setup_telegram_webhook()
         t_ping = threading.Thread(target=keep_alive_worker, daemon=True)
         t_ping.start()
-        t_scan = threading.Thread(target=market_scanner_worker, daemon=True)
-        t_scan.start()
+        # Market scanning is handled strictly by Local MT5 Master Engine
+        # t_scan = threading.Thread(target=market_scanner_worker, daemon=True)
+        # t_scan.start()
 
 init_background_workers()
 
